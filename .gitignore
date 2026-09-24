@@ -1,0 +1,10 @@
+# Adobe-licensed SDK, vendored locally per docs/DESIGN.md -- not committed.
+AfterEffectsSDK/
+docs/*.zip
+
+# Build output
+build/
+test_output/
+
+# macOS
+.DS_Store
