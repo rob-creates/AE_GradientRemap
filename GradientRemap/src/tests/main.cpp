@@ -35,6 +35,7 @@ bool Near(float a, float b, float eps = 1e-5f) { return std::fabs(a - b) <= eps;
 void TestFlattenRoundTrip() {
     GradientData g;
     g.interpolation_mode = InterpMode::OKLCH;
+    g.path = InterpPath::Ease;
     g.knots = {
         {0.00f, 0.0f, 0.0f, 0.0f, 1.0f},
         {0.25f, 0.8f, 0.1f, 0.1f, 1.0f},
@@ -49,6 +50,7 @@ void TestFlattenRoundTrip() {
     if (!restored) return;
 
     Check(restored->interpolation_mode == g.interpolation_mode, "flatten round-trip: interp mode preserved");
+    Check(restored->path == g.path, "flatten round-trip: path preserved");
     Check(restored->knots.size() == g.knots.size(), "flatten round-trip: knot count preserved");
     for (size_t i = 0; i < g.knots.size() && i < restored->knots.size(); ++i) {
         const auto& a = g.knots[i];
@@ -70,6 +72,7 @@ void TestFlattenRoundTrip() {
 
 void TestWysiwygEndpoints() {
     GradientData g;
+    g.path = InterpPath::Linear; // isolate interpolation_mode behaviour from path shaping
     g.knots = {
         {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
         {1.0f, 1.0f, 1.0f, 1.0f, 1.0f},
@@ -92,9 +95,39 @@ void TestWysiwygEndpoints() {
     }
 }
 
+void TestWorkingSpaceGammaParameter() {
+    // Phase 2: a nonzero working_space_gamma must still preserve WYSIWYG endpoints
+    // exactly (any power-law curve maps 0->0 and 1->1), but must change the *interior*
+    // blend relative to the default precise-sRGB curve -- otherwise the parameter isn't
+    // actually doing anything.
+    GradientData g;
+    g.interpolation_mode = InterpMode::LinearLight;
+    g.path = InterpPath::Linear;
+    g.knots = {
+        {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+        {1.0f, 1.0f, 1.0f, 1.0f, 1.0f},
+    };
+    constexpr float kTestGamma = 2.2f;
+
+    RGBAf at0 = EvaluateGradient(g, 0.0f, kTestGamma);
+    RGBAf at1 = EvaluateGradient(g, 1.0f, kTestGamma);
+    Check(Near(at0.r, 0.0f) && Near(at1.r, 1.0f), "LinearLight+gamma: WYSIWYG endpoints preserved under a nonzero gamma");
+
+    RGBAf midDefault = EvaluateGradient(g, 0.5f); // gamma=0 -> precise sRGB curve
+    RGBAf midGamma = EvaluateGradient(g, 0.5f, kTestGamma);
+    Check(!Near(midDefault.r, midGamma.r, 1e-4f),
+          "LinearLight+gamma: nonzero gamma actually changes the interior blend vs. the sRGB default");
+
+    g.interpolation_mode = InterpMode::OKLCH;
+    RGBAf oklchAt0 = EvaluateGradient(g, 0.0f, kTestGamma);
+    RGBAf oklchAt1 = EvaluateGradient(g, 1.0f, kTestGamma);
+    Check(Near(oklchAt0.r, 0.0f) && Near(oklchAt1.r, 1.0f), "OKLCH+gamma: WYSIWYG endpoints preserved under a nonzero gamma");
+}
+
 void TestNaiveReferenceValues() {
     GradientData g;
     g.interpolation_mode = InterpMode::NaiveLerp;
+    g.path = InterpPath::Linear;
     g.knots = {
         {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
         {1.0f, 1.0f, 1.0f, 1.0f, 1.0f},
@@ -112,6 +145,7 @@ void TestOklchAvoidsLuminanceDip() {
     // midpoint L should measurably dip below that mean. This test demonstrates and
     // guards the exact property the user asked for ("not unnecessarily flattened").
     GradientData g;
+    g.path = InterpPath::Linear;
     g.knots = {
         {0.0f, 1.0f, 0.0f, 0.0f, 1.0f}, // pure red
         {1.0f, 0.0f, 1.0f, 0.0f, 1.0f}, // pure green
@@ -142,11 +176,140 @@ void TestOklchAvoidsLuminanceDip() {
     Check(lNaiveMid < expectedMeanL - 0.02f, "Naive: red->green midpoint L measurably dips below the endpoint mean");
 }
 
+void TestPathCubicDegeneratesToLinearFor2Knots() {
+    // A 2-knot gradient has only one segment -- there's nothing for Cubic to smooth
+    // relative to Linear, and the reflected-phantom-point maths should make them
+    // produce bit-identical (to float epsilon) results. This locks in that guarantee
+    // across all 3 interpolation modes so a future change to the reflection logic
+    // can't silently break it.
+    GradientData g;
+    g.knots = {
+        {0.0f, 0.1f, 0.8f, 0.3f, 1.0f},
+        {1.0f, 0.9f, 0.2f, 0.6f, 0.4f},
+    };
+    for (InterpMode mode : {InterpMode::NaiveLerp, InterpMode::LinearLight, InterpMode::OKLCH}) {
+        g.interpolation_mode = mode;
+        std::string modeName = mode == InterpMode::NaiveLerp ? "Naive" : mode == InterpMode::LinearLight ? "LinearLight" : "OKLCH";
+        for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+            g.path = InterpPath::Linear;
+            RGBAf viaLinear = EvaluateGradient(g, t);
+            g.path = InterpPath::Cubic;
+            RGBAf viaCubic = EvaluateGradient(g, t);
+            Check(Near(viaLinear.r, viaCubic.r, 1e-4f) && Near(viaLinear.g, viaCubic.g, 1e-4f) &&
+                      Near(viaLinear.b, viaCubic.b, 1e-4f) && Near(viaLinear.a, viaCubic.a, 1e-4f),
+                  modeName + ": Cubic == Linear for a 2-knot gradient at t=" + std::to_string(t));
+        }
+    }
+}
+
+void TestPathStepHoldsSegmentStart() {
+    GradientData g;
+    g.interpolation_mode = InterpMode::NaiveLerp;
+    g.path = InterpPath::Step;
+    g.knots = {
+        {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+        {0.5f, 1.0f, 0.0f, 0.0f, 1.0f},
+        {1.0f, 0.0f, 1.0f, 0.0f, 1.0f},
+    };
+    RGBAf midFirstSegment = EvaluateGradient(g, 0.25f);
+    Check(Near(midFirstSegment.r, 0.0f) && Near(midFirstSegment.g, 0.0f),
+          "Step: mid-first-segment holds knot 0's colour exactly, no blend");
+    RGBAf midSecondSegment = EvaluateGradient(g, 0.75f);
+    Check(Near(midSecondSegment.r, 1.0f) && Near(midSecondSegment.g, 0.0f),
+          "Step: mid-second-segment holds knot 1's colour exactly, no blend");
+}
+
+void TestPathCubicReducesRidgeAtInteriorKnot() {
+    // The user's reported symptom: piecewise-linear (or independently-eased) segments
+    // meeting at a knot with a different slope on each side create a visible "ridge"
+    // (Mach banding) at the knot, because the DERIVATIVE is discontinuous there even
+    // though the VALUE is continuous. Build a 3-knot gradient with deliberately
+    // different segment slopes (0->0.1 over the first half, 0.1->1.0 over the second)
+    // and confirm Cubic's one-sided derivatives either side of the middle knot are much
+    // closer to each other than Linear's are.
+    GradientData g;
+    g.interpolation_mode = InterpMode::NaiveLerp;
+    g.knots = {
+        {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+        {0.5f, 0.1f, 0.1f, 0.1f, 1.0f},
+        {1.0f, 1.0f, 1.0f, 1.0f, 1.0f},
+    };
+    constexpr float kEps = 0.01f;
+
+    g.path = InterpPath::Linear;
+    float linearLeftSlope = (EvaluateGradient(g, 0.5f).r - EvaluateGradient(g, 0.5f - kEps).r) / kEps;
+    float linearRightSlope = (EvaluateGradient(g, 0.5f + kEps).r - EvaluateGradient(g, 0.5f).r) / kEps;
+    float linearKink = std::fabs(linearRightSlope - linearLeftSlope);
+
+    g.path = InterpPath::Cubic;
+    float cubicLeftSlope = (EvaluateGradient(g, 0.5f).r - EvaluateGradient(g, 0.5f - kEps).r) / kEps;
+    float cubicRightSlope = (EvaluateGradient(g, 0.5f + kEps).r - EvaluateGradient(g, 0.5f).r) / kEps;
+    float cubicKink = std::fabs(cubicRightSlope - cubicLeftSlope);
+
+    std::cout << "info: derivative discontinuity at interior knot -- linear=" << linearKink << " cubic=" << cubicKink
+               << "\n";
+    Check(cubicKink < linearKink * 0.1f,
+          "Cubic: derivative discontinuity at an interior knot is far smaller than Linear's (fixes the reported ridge)");
+}
+
+void TestPathCubicOKLCHNoHueOvershoot() {
+    // Regression for a reported bug (2026-09-25): a magenta->green->yellow gradient
+    // under OKLCH+Cubic showed a "cyan blip" on the green->yellow segment. Root cause:
+    // green's hue sits at a local extremum in the 3-knot hue sequence (hue increases
+    // sharply coming from magenta, then must decrease going to yellow), so the plain
+    // Catmull-Rom tangent at green (the average of both neighbours' secants) pointed the
+    // wrong way -- toward higher/cyan-ward hue -- causing the curve to overshoot past
+    // green before curving back down to yellow. MonotoneTangent fixes this by flattening
+    // the tangent at exactly this kind of local extremum.
+    GradientData g;
+    g.interpolation_mode = InterpMode::OKLCH;
+    g.path = InterpPath::Cubic;
+    g.knots = {
+        {0.0f, 0.72f, 0.11f, 0.68f, 1.0f}, // magenta-ish
+        {0.5f, 0.10f, 0.55f, 0.12f, 1.0f}, // green
+        {1.0f, 0.85f, 0.80f, 0.10f, 1.0f}, // yellow
+    };
+
+    auto hueOf = [](const RGBAf& c) {
+        float lr = WorkingSpaceTransform::ToLinear(c.r);
+        float lg = WorkingSpaceTransform::ToLinear(c.g);
+        float lb = WorkingSpaceTransform::ToLinear(c.b);
+        return OKLabToOKLCH(LinearSRGBToOKLab(lr, lg, lb)).h;
+    };
+
+    float hGreen = hueOf(EvaluateGradient(g, 0.5f));
+    float hYellow = hueOf(EvaluateGradient(g, 1.0f));
+    // Neither reference hue is near the +/-pi wrap boundary for this colour choice, so a
+    // plain (non-circular) min/max comparison is safe here.
+    float lo = std::min(hGreen, hYellow) - 0.003f; // tight tolerance for float/atan2 noise only
+    float hi = std::max(hGreen, hYellow) + 0.003f;
+
+    bool overshootFound = false;
+    float worst = 0.0f;
+    for (int i = 1; i < 20; ++i) {
+        float t = 0.5f + 0.5f * (static_cast<float>(i) / 20.0f);
+        float h = hueOf(EvaluateGradient(g, t));
+        if (h < lo || h > hi) {
+            overshootFound = true;
+            worst = (h < lo) ? (lo - h) : (h - hi);
+        }
+    }
+    std::cout << "info: green->yellow hue range [" << lo << "," << hi << "], overshoot=" << (overshootFound ? worst : 0.0f)
+               << "\n";
+    Check(!overshootFound,
+          "OKLCH+Cubic: hue does not overshoot past either endpoint on the green->yellow segment (no 'cyan blip')");
+}
+
 void RunTests() {
     TestFlattenRoundTrip();
     TestWysiwygEndpoints();
     TestNaiveReferenceValues();
     TestOklchAvoidsLuminanceDip();
+    TestWorkingSpaceGammaParameter();
+    TestPathCubicDegeneratesToLinearFor2Knots();
+    TestPathStepHoldsSegmentStart();
+    TestPathCubicReducesRidgeAtInteriorKnot();
+    TestPathCubicOKLCHNoHueOvershoot();
 
     std::cout << "\n" << (g_failures == 0 ? "ALL TESTS PASSED" : std::to_string(g_failures) + " TEST(S) FAILED") << "\n";
 }
@@ -204,12 +367,39 @@ int DumpStrips(const std::string& outDir) {
         for (auto& [modeName, mode] : modes) {
             GradientData g = c.gradient;
             g.interpolation_mode = mode;
+            g.path = InterpPath::Linear; // keep pre-existing strips' meaning unchanged
             std::string base = c.name + "_" + modeName;
             WritePPMStrip(std::filesystem::path(outDir) / (base + ".ppm"), g, 512, 48);
             WriteCSVStrip(std::filesystem::path(outDir) / (base + ".csv"), g, 64);
             std::cout << "wrote " << base << ".ppm / .csv\n";
         }
     }
+    // Path comparison: OKLCH+Linear vs OKLCH+Cubic on the multi-knot gradient, to
+    // visually confirm the "ridge"/Mach-banding fix at each interior knot.
+    for (auto& [pathName, path] : std::vector<std::pair<std::string, InterpPath>>{
+             {"linear", InterpPath::Linear}, {"step", InterpPath::Step}, {"smooth", InterpPath::Ease},
+             {"cubic", InterpPath::Cubic}}) {
+        GradientData g = multiKnot;
+        g.interpolation_mode = InterpMode::OKLCH;
+        g.path = path;
+        std::string base = "multi_knot_oklch_path_" + pathName;
+        WritePPMStrip(std::filesystem::path(outDir) / (base + ".ppm"), g, 512, 48);
+        std::cout << "wrote " << base << ".ppm\n";
+    }
+
+    // Regression visual: magenta->green->yellow under OKLCH+Cubic, the reported "cyan
+    // blip" case (see TestPathCubicOKLCHNoHueOvershoot).
+    GradientData magentaGreenYellow;
+    magentaGreenYellow.interpolation_mode = InterpMode::OKLCH;
+    magentaGreenYellow.path = InterpPath::Cubic;
+    magentaGreenYellow.knots = {
+        {0.0f, 0.72f, 0.11f, 0.68f, 1.0f},
+        {0.5f, 0.10f, 0.55f, 0.12f, 1.0f},
+        {1.0f, 0.85f, 0.80f, 0.10f, 1.0f},
+    };
+    WritePPMStrip(std::filesystem::path(outDir) / "magenta_green_yellow_oklch_cubic.ppm", magentaGreenYellow, 512, 48);
+    std::cout << "wrote magenta_green_yellow_oklch_cubic.ppm\n";
+
     std::cout << "\nStrips written to " << std::filesystem::absolute(outDir).string()
                << " -- open the .ppm files (e.g. macOS Preview) to eyeball smoothness.\n";
     return 0;

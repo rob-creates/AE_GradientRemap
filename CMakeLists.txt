@@ -34,6 +34,8 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/AfterEffectsSDK")
     add_library(GradientRemapPlugin MODULE
         GradientRemap/src/plugin/GradientRemap.h
         GradientRemap/src/plugin/GradientRemap_Main.cpp
+        GradientRemap/src/plugin/GradientRemap_ColorSpace.h
+        GradientRemap/src/plugin/GradientRemap_ColorSpace.cpp
         ${AE_SDK_ROOT}/Util/AEGP_SuiteHandler.cpp
         ${AE_SDK_ROOT}/Util/MissingSuiteError.cpp
         ${AE_SDK_ROOT}/Util/Smart_Utils.cpp

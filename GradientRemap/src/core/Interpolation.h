@@ -8,12 +8,19 @@ struct RGBAf {
     float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
 };
 
-// Stand-in working-space <-> linear-light transfer function. Phase 1 hardcodes the
-// sRGB EOTF/OETF; Phase 2 replaces the body of these two functions with a transform
-// derived from AE's actual queried project working space, without touching any caller.
+// Working-space <-> linear-light transfer function. `gamma <= 0` (the default) uses
+// the precise sRGB piecewise EOTF/OETF -- this is the Phase 1 behaviour and what every
+// existing GradientRemapCoreTests case exercises. `gamma > 0` uses a plain power-law
+// curve (c^gamma / c^(1/gamma)) instead, driven by Phase 2's AEGP_ColorSettingsSuite6
+// query of AE's actual project working space (see docs/DESIGN.md).
+//
+// This is a parameter, not mutable global state: SmartFX declares
+// PF_OutFlag2_SUPPORTS_THREADED_RENDERING, so multiple frames (potentially from
+// different comps with different working spaces) can render concurrently on different
+// threads -- a shared "current transform" global would be a race condition.
 struct WorkingSpaceTransform {
-    static float ToLinear(float c);
-    static float ToWorkingSpace(float c);
+    static float ToLinear(float c, float gamma = 0.0f);
+    static float ToWorkingSpace(float c, float gamma = 0.0f);
 };
 
 struct OKLab {
@@ -37,7 +44,9 @@ OKLab OKLCHToOKLab(const OKLCH& lch);
 // Evaluate the gradient at parametric position t. t outside [knots.front().position,
 // knots.back().position] is clamped to the nearest end knot's colour (no extrapolation
 // at the core level -- that policy belongs to the AE integration layer in Phase 2).
-// `g` must satisfy g.IsValid().
-RGBAf EvaluateGradient(const GradientData& g, float t);
+// `g` must satisfy g.IsValid(). `working_space_gamma` is forwarded to
+// WorkingSpaceTransform for the LinearLight/OKLCH modes (ignored by NaiveLerp, which
+// never converts); see WorkingSpaceTransform's doc comment above.
+RGBAf EvaluateGradient(const GradientData& g, float t, float working_space_gamma = 0.0f);
 
 } // namespace GradientRemap

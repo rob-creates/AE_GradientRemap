@@ -7,11 +7,6 @@ namespace GradientRemap {
 
 namespace {
 
-void WriteU16LE(std::vector<uint8_t>& out, uint16_t v) {
-    out.push_back(static_cast<uint8_t>(v & 0xFF));
-    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
-}
-
 void WriteU32LE(std::vector<uint8_t>& out, uint32_t v) {
     out.push_back(static_cast<uint8_t>(v & 0xFF));
     out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
@@ -23,12 +18,6 @@ void WriteF32LE(std::vector<uint8_t>& out, float f) {
     uint32_t bits;
     std::memcpy(&bits, &f, sizeof(bits));
     WriteU32LE(out, bits);
-}
-
-bool ReadU16LE(const uint8_t* data, size_t size, size_t offset, uint16_t& out) {
-    if (offset + 2 > size) return false;
-    out = static_cast<uint16_t>(data[offset]) | (static_cast<uint16_t>(data[offset + 1]) << 8);
-    return true;
 }
 
 bool ReadU32LE(const uint8_t* data, size_t size, size_t offset, uint32_t& out) {
@@ -79,8 +68,9 @@ std::vector<uint8_t> GradientData::Flatten() const {
     WriteU32LE(out, kMagic);
     WriteU32LE(out, kVersion);
     out.push_back(static_cast<uint8_t>(interpolation_mode));
+    out.push_back(static_cast<uint8_t>(path));
     out.push_back(static_cast<uint8_t>(knots.size()));
-    WriteU16LE(out, 0); // reserved
+    out.push_back(0); // reserved
 
     for (const auto& k : knots) {
         WriteF32LE(out, k.position);
@@ -105,18 +95,19 @@ std::optional<GradientData> GradientData::Unflatten(const uint8_t* data, size_t 
     offset += 4;
     if (version != kVersion) return std::nullopt; // no older versions to migrate from yet
 
-    if (offset + 4 > size) return std::nullopt; // interp_mode(1) + knot_count(1) + reserved(2)
+    if (offset + 4 > size) return std::nullopt; // interp_mode(1) + path(1) + knot_count(1) + reserved(1)
     uint8_t interp_mode_raw = data[offset++];
+    uint8_t path_raw = data[offset++];
     uint8_t knot_count = data[offset++];
-    uint16_t reserved = 0;
-    ReadU16LE(data, size, offset, reserved);
-    offset += 2;
+    ++offset; // reserved
 
     if (interp_mode_raw > static_cast<uint8_t>(InterpMode::OKLCH)) return std::nullopt;
+    if (path_raw > static_cast<uint8_t>(InterpPath::Cubic)) return std::nullopt;
     if (knot_count < kMinKnots) return std::nullopt;
 
     GradientData g;
     g.interpolation_mode = static_cast<InterpMode>(interp_mode_raw);
+    g.path = static_cast<InterpPath>(path_raw);
     g.knots.reserve(knot_count);
 
     for (uint8_t i = 0; i < knot_count; ++i) {

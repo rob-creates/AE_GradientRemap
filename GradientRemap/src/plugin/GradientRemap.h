@@ -34,10 +34,22 @@
 // Fixed 4-knot Phase-2 validation UI (see docs/DESIGN.md): a throwaway stock-param
 // front end used to exercise GradientRemapCore through real SmartFX render calls
 // before the Phase 3 custom multi-knot gradient-bar UI replaces it.
+//
+// Luma formula is intentionally NOT a user-facing control: per user feedback
+// (2026-09-25), exposing 709/601/average as a choice added no real value and worked
+// against "colour space handled without intervention" -- Rec.709 relative luminance is
+// hardcoded (see ComputeLuma in GradientRemap_Main.cpp).
+//
+// Alpha remapping is NOT a simple on/off toggle here for the same reason: the intended
+// design is a second, independent alpha knot list remapping the same source luminance,
+// multiplied into the existing source alpha -- that needs the Phase 3 custom UI to be
+// meaningful (conventionally drawn on the opposite side of the gradient bar from the
+// colour knots, colour below/alpha above, matching Photoshop's gradient editor). Source
+// alpha is passed through unchanged in this Phase 2 UI until then.
 enum {
     GRADREMAP_INPUT = 0,
-    GRADREMAP_LUMA_FORMULA,
     GRADREMAP_INTERP_MODE,
+    GRADREMAP_PATH,
     GRADREMAP_KNOT0_COLOR,
     GRADREMAP_KNOT0_POS,
     GRADREMAP_KNOT1_COLOR,
@@ -47,14 +59,15 @@ enum {
     GRADREMAP_KNOT3_COLOR,
     GRADREMAP_KNOT3_POS,
     GRADREMAP_CLAMP_INPUT,
-    GRADREMAP_REMAP_ALPHA,
+    GRADREMAP_DITHER,
+    GRADREMAP_DEBAND_THRESHOLD,
     GRADREMAP_NUM_PARAMS
 };
 
 enum {
     KNOT_DISK_ID = 1,
-    LUMA_FORMULA_DISK_ID,
     INTERP_MODE_DISK_ID,
+    PATH_DISK_ID,
     KNOT0_COLOR_DISK_ID,
     KNOT0_POS_DISK_ID,
     KNOT1_COLOR_DISK_ID,
@@ -64,12 +77,18 @@ enum {
     KNOT3_COLOR_DISK_ID,
     KNOT3_POS_DISK_ID,
     CLAMP_INPUT_DISK_ID,
-    REMAP_ALPHA_DISK_ID
+    DITHER_DISK_ID,
+    DEBAND_THRESHOLD_DISK_ID
 };
 
-enum { LumaFormula_REC709 = 1, LumaFormula_REC601, LumaFormula_AVERAGE };
-
 enum { InterpModePopup_NAIVE = 1, InterpModePopup_LINEAR_LIGHT, InterpModePopup_OKLCH };
+
+// Subset of Cinema 4D's gradient path options (Blend and Cubic Bias not implemented).
+// Cubic is first/default per user preference (2026-09-25): smoothest path through
+// multiple knots, least plateau/ridging at each knot. "Ease" (renamed from "Smooth",
+// 2026-09-25 -- it isn't smoother than Cubic overall and shouldn't read as if it were)
+// is second, ahead of Linear/Step.
+enum { InterpPathPopup_CUBIC = 1, InterpPathPopup_EASE, InterpPathPopup_LINEAR, InterpPathPopup_STEP };
 
 extern "C" {
 DllExport PF_Err EffectMain(
