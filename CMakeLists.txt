@@ -70,7 +70,6 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/AfterEffectsSDK")
         BUNDLE TRUE
         BUNDLE_EXTENSION "plugin"
         OUTPUT_NAME "GradientRemap"
-        XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "-"
     )
 
     # Xcode's native Resources build phase compiles a PiPL .r file with Rez into a
@@ -114,6 +113,53 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/AfterEffectsSDK")
         add_dependencies(GradientRemapPlugin GradientRemapResources)
     else()
         message(WARNING "Rez not found -- GradientRemap.plugin will be missing its PiPL resource and won't load in AE.")
+    endif()
+
+    # Code signing (macOS). On Apple Silicon, ld automatically ad-hoc-signs the linked
+    # executable -- but that happens BEFORE GradientRemapResources adds Resources/
+    # Info.plist/PkgInfo above, so the signature is stale relative to the bundle's real
+    # contents (`spctl -a` reports "code has no resources but signature indicates they
+    # must be present" -- found 2026-09-26). Re-signing the whole bundle after resources
+    # are in place fixes that for local ad-hoc use.
+    #
+    # For distribution to OTHER machines, ad-hoc signing is not enough -- Gatekeeper only
+    # accepts it on the machine that built it. Pass a real Developer ID identity instead:
+    #   cmake -S . -B build -DGRADIENT_REMAP_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+    #   cmake --build build
+    # then notarize and staple (see docs/DESIGN.md "Code signing and notarization").
+    #
+    # Same OUTPUT-based-custom-command-with-explicit-DEPENDS pattern as
+    # GradientRemapResources above, for the same reason: a POST_BUILD command here would
+    # only rerun when GradientRemapPlugin's own sources force a relink, not when the .r/
+    # Info.plist files alone change the resources this signature needs to cover.
+    set(GRADIENT_REMAP_CODESIGN_IDENTITY "-" CACHE STRING
+        "Code signing identity for GradientRemap.plugin. \"-\" (default) is ad-hoc -- fine \
+for local builds/testing, but Gatekeeper will reject it on any other machine. Set to a \
+real \"Developer ID Application: Name (TEAMID)\" identity before distributing.")
+
+    find_program(CODESIGN_EXECUTABLE codesign)
+    if(CODESIGN_EXECUTABLE)
+        set(GRADIENT_REMAP_CODESIGN_STAMP "${CMAKE_CURRENT_BINARY_DIR}/GradientRemap_codesign.stamp")
+        set(GRADIENT_REMAP_CODESIGN_ARGS --force --timestamp)
+        if(NOT GRADIENT_REMAP_CODESIGN_IDENTITY STREQUAL "-")
+            # Hardened runtime is required for notarization; meaningless (and skipped)
+            # for a plain ad-hoc build that will never be notarized.
+            list(APPEND GRADIENT_REMAP_CODESIGN_ARGS --options runtime)
+        endif()
+
+        add_custom_command(
+            OUTPUT "${GRADIENT_REMAP_CODESIGN_STAMP}"
+            COMMAND ${CODESIGN_EXECUTABLE} ${GRADIENT_REMAP_CODESIGN_ARGS}
+                    --sign "${GRADIENT_REMAP_CODESIGN_IDENTITY}"
+                    "$<TARGET_BUNDLE_DIR:GradientRemapPlugin>"
+            COMMAND ${CMAKE_COMMAND} -E touch "${GRADIENT_REMAP_CODESIGN_STAMP}"
+            DEPENDS "$<TARGET_FILE:GradientRemapPlugin>" "${GRADIENT_REMAP_RSRC_STAMP}"
+            COMMENT "Code-signing GradientRemap.plugin (identity: ${GRADIENT_REMAP_CODESIGN_IDENTITY})"
+            VERBATIM
+        )
+        add_custom_target(GradientRemapCodesign ALL DEPENDS "${GRADIENT_REMAP_CODESIGN_STAMP}")
+    else()
+        message(WARNING "codesign not found -- GradientRemap.plugin will be unsigned.")
     endif()
 else()
     message(STATUS "AfterEffectsSDK/ not found -- skipping plugin target (core library + tests still build/run).")

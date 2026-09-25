@@ -699,3 +699,56 @@ ctest --test-dir build --output-on-failure
 
 `CoreDumpStrips` writes `.ppm`/`.csv` gradient strips per interpolation mode to
 `build/test_output/` for visual inspection (open the `.ppm` files in Preview).
+
+## Code signing and notarization (2026-09-26)
+
+User asked whether the plugin could just be sent to other designers to drop into their
+Plug-ins folder. Checked the actual built bundle rather than guessing: `codesign -dv`
+showed `Signature=adhoc` (Apple Silicon's linker ad-hoc-signs every arm64 binary
+automatically, not something this project's build asked for), and `spctl -a -vv -t
+install` **failed outright** with *"code has no resources but signature indicates they
+must be present"* -- a real bug, not just "needs a paid account." Root cause: `ld`
+signs the executable at link time, which happens *before* `GradientRemapResources`
+(the Rez/Info.plist/PkgInfo step) adds the rest of the bundle's contents, so the
+signature was stale relative to the bundle's final contents even before considering
+Gatekeeper's trust question at all.
+
+**Fix (`CMakeLists.txt`)**: a new `GradientRemapCodesign` step re-signs the *whole*
+bundle after `GradientRemapResources` runs, via the same OUTPUT-based-custom-command-
+with-explicit-`DEPENDS` pattern as the resources step itself (a plain `POST_BUILD`
+command would only rerun when `GradientRemapPlugin`'s own sources force a relink, not
+when the `.r`/`Info.plist` files alone change what the signature needs to cover --
+exactly the class of bug already fixed once for the resources step). Controlled by a
+new cache variable:
+```
+cmake -S . -B build -DGRADIENT_REMAP_CODESIGN_IDENTITY="Developer ID Application: Name (TEAMID)"
+```
+Default is `"-"` (ad-hoc) so a plain `cmake --build build` keeps working for local
+dev/testing with no account needed -- confirmed via `spctl` that ad-hoc now at least
+signs *correctly* (no more resource-mismatch error), while still being correctly
+*rejected* by Gatekeeper's install assessment (`source=Unnotarized Developer ID` once a
+real identity is used, plain untrusted-signer rejection for ad-hoc) -- ad-hoc only ever
+satisfies Gatekeeper on the machine that built it, never on a machine it's copied to.
+`--options runtime` (hardened runtime, required for notarization) is only added when a
+real identity is set; meaningless for an ad-hoc build that will never be notarized.
+
+**Full distribution pipeline** (one-time account setup already done -- user has a
+`Developer ID Application: Rob Payne (YAEAPD4M84)` certificate installed):
+1. Configure+build signed: `cmake -S . -B build -DGRADIENT_REMAP_CODESIGN_IDENTITY="Developer ID Application: Rob Payne (YAEAPD4M84)"` then `cmake --build build`.
+2. One-time only: generate an app-specific password at appleid.apple.com (Sign-In and
+   Security -> App-Specific Passwords), then `xcrun notarytool store-credentials
+   "AC_NOTARY_PROFILE" --apple-id "<email>" --team-id "YAEAPD4M84" --password
+   "<app-specific password>"` to save it in the keychain (never the regular Apple ID
+   password, and never typed into a shared/committed file).
+3. Per release: zip for submission (`ditto -c -k --keepParent build/GradientRemap.plugin
+   build/GradientRemap.zip`), submit and wait (`xcrun notarytool submit
+   build/GradientRemap.zip --keychain-profile "AC_NOTARY_PROFILE" --wait`), then staple
+   the ticket to the **original bundle**, not the zip (`xcrun stapler staple
+   build/GradientRemap.plugin`).
+4. Verify: `spctl -a -vv -t install build/GradientRemap.plugin` should read
+   `source=Notarized Developer ID`. That stapled `.plugin` is what's safe to send to
+   other designers -- the notarization ticket is embedded, so it works offline too.
+
+Steps 2-3 need the user's own Apple ID/credentials and were intentionally left as
+manual commands for them to run themselves, not automated into CMake or run by the
+assistant.
