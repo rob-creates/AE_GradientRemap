@@ -467,6 +467,228 @@ PiPL version/out-flags mismatches and the `extent_hint`/black-output bug documen
 above. The user applied the effect to a layer and confirmed the gradient remap renders
 correctly and responds to parameter changes.
 
+## Phase 3: custom multi-knot gradient-bar UI (2026-09-25)
+
+Replaced the throwaway Phase 2 fixed-4-knot stock-param UI with a real custom-drawn,
+interactive gradient-bar editor in the Effect Controls Window, matching the
+conventional Photoshop/Cinema 4D layout: a coloured strip with downward-pointing
+triangle knot markers below it. Click-to-add, drag-to-reposition (knots can freely slide
+past one another, reordering the gradient's colours), drag-far-away-to-delete,
+double-click-to-open-colour-picker. No keyboard delete (removed after a real-AE test,
+see below). "Interpolation" and "Path" stay as separate stock popups (orthogonal to the
+knot list itself, simpler and more discoverable than folding them into the custom UI).
+
+**Architecture**: the knot list moved into a single `PF_ADD_ARBITRARY2` param
+(`GRADREMAP_GRADIENT`), replacing the four `PF_ADD_COLOR`/`PF_ADD_FLOAT_SLIDER` pairs.
+New files: `GradientRemap_Arb.cpp` (the 11 `PF_ADD_ARBITRARY2` callbacks) and
+`GradientRemap_UI.cpp` (event handling + sequence-data lifecycle). Modelled directly on
+the vendored SDK's `ColorGrid` (arb callbacks, Drawbot draw pattern, AppSuite4 bg-colour/
+colour-picker/invalidate calls) and `Custom_ECW_UI` (drag-gesture `continue_refcon`
+pattern) samples.
+
+**Key design decision — live handle bytes ARE the flattened form**: unlike ColorGrid's
+`CG_ArbData` (a fixed-size POD array, trivially memcpy'd), our knot list is
+variable-length (up to 256 knots), so instead of inventing a parallel fixed-array mirror
+struct, the arb param's live `PF_Handle` bytes are always exactly
+`GradientData::Flatten()`'s output. NEW/COPY/FLAT_SIZE/FLATTEN become pure
+handle-size-and-memcpy operations; only UNFLATTEN/INTERP/COMPARE need to interpret the
+bytes, via the same `GradientData::Unflatten()` the core render path and
+`GradientRemapCoreTests` already exercise. `GradientRemap_UnflattenArbHandle`/
+`GradientRemap_ReflattenIntoHandle`/`GradientRemap_CreateDefaultArbHandle` are the shared
+entry points `GradientRemap_Main.cpp` (`BuildGradientFromParams`, `ParamsSetup`'s default
+handle) and `GradientRemap_UI.cpp` both go through.
+
+**Sequence data**: a small transient `GradientUISeqData` (selection index, delete-pending
+flag, manual double-click tracking) lives in `in_data`/`out_data->sequence_data`,
+lifecycle-managed via `PF_Cmd_SEQUENCE_SETUP/SETDOWN/RESETUP/FLATTEN`. This is UI-thread
+state only, never read during rendering — genuinely separate memory from the render
+thread's own sequence data as of AE 13.5, so it's safe to mutate freely from event
+handlers without touching `PF_OutFlag2_SUPPORTS_THREADED_RENDERING` render-side safety.
+
+**A pre-existing bug caught by the build, not by review**: `ArbCompare` (written in the
+same pass, before this build) called `PF_GET_HANDLE_SIZE`/`PF_LOCK_HANDLE`/
+`PF_UNLOCK_HANDLE` — macros that expand to reference an `in_data` in scope — but the
+function signature never took `in_data`. Compiled fine as C++ until link/instantiation
+in this exact TU; caught immediately on the first real `cmake --build`. Fixed by adding
+`PF_InData* in_data` to `ArbCompare`'s signature and its one call site. Lesson: these
+handle macros are silently dependent on a local named `in_data` — any new arb callback
+helper that uses `PF_LOCK_HANDLE`-family macros must take `in_data` as a parameter, even
+if the compiler wouldn't obviously suggest it from the macro's own call-site diagnostics
+in an IDE lacking the AE SDK's full include paths (this project's live-editor lint
+consistently can't resolve `AEConfig.h`, so real verification only ever happens via
+`cmake --build`, same as every other AE-specific bug in this project so far).
+
+**Real bug found after first real-AE test (2026-09-25): the gradient param row was
+completely invisible in the Effect Controls Window** — not drawn blank, not collapsed,
+simply absent, while every other param (Interpolation, Path, Clamp Range, etc.) showed
+fine. Root cause: the PiPL resource (`GradientRemapPiPL.r`) hardcodes
+`AE_Effect_Global_OutFlags` as a **literal hex value**, separate from the C++
+`GlobalSetup()` code that computes `out_data->out_flags` at runtime — this project has
+been bitten by this exact class of mismatch before (see "PiPL version/outflags
+bit-packing" in Phase 2 notes above). Adding `PF_OutFlag_CUSTOM_UI` to `GlobalSetup()`
+without updating the PiPL literal meant AE never knew this plugin wanted any custom-UI
+space at all, so it reserved none — not even a blank row — for the one param that needed
+it. Fixed by OR-ing in `PF_OutFlag_CUSTOM_UI` (`1<<15` = `0x8000`) to get
+`0x02008440`.
+
+**Compounding build-system bug found while fixing the above**: editing the `.r` file and
+rebuilding reported "Built target GradientRemapPlugin" with no resource-compile step
+and no bundle update — the fix silently didn't take effect. Cause: the Rez/Info.plist/
+PkgInfo step was a `add_custom_command(TARGET ... POST_BUILD ...)`, which has no
+`DEPENDS` and only reruns when the target's own sources force a relink; touching the
+`.r` file (not a tracked source) never invalidated anything. Fixed by converting it to
+an `OUTPUT`-based custom command with an explicit stamp file and
+`DEPENDS "${...}/GradientRemapPiPL.r" "${...}/GradientRemap-Info.plist"`, wired via a
+new `GradientRemapResources` custom target that `GradientRemapPlugin` depends on.
+Verified by touching only the `.r` file and confirming `cmake --build` reruns the Rez
+step and rewrites the bundle's `.rsrc`. **Lesson: any future change to the PiPL `.r` or
+`Info.plist` needs a `rm -rf build/GradientRemap.plugin` + reconfigure to be verified as
+actually taking effect if this dependency wiring is ever touched again** — or, more
+simply, trust that this is now fixed and a plain rebuild suffices.
+
+**Confirmed gaps — need real-AE verification, not further guessing:**
+- **Double-click detection**: no dedicated AE event type exists for this, and no
+  vendored SDK example exercises `PF_DoClickEventInfo::num_clicks` as a working
+  reference. Implemented a hedge: accept `num_clicks >= 2` OR a manual same-knot
+  quick-succession check via sequence data (`last_click_knot_index`/`last_click_when`,
+  threshold `kDoubleClickMaxWhenDelta = 60` — an untested starting guess at what units
+  `PF_DoClickEventInfo::when` actually uses). **User needs to verify double-click
+  actually opens the colour picker in real AE**, and report back if the timing feels
+  wrong so the threshold can be tuned.
+- **Colour-picker return value application**: `PF_AppColorPickerDialog` is skipped
+  entirely under Premiere/Elements (`in_data->appl_id == kAppID_Premiere`, matching
+  ColorGrid's own guard) — double-clicking a knot in those hosts currently does
+  nothing (no fallback dialog). Not expected to matter for this project's AE-only
+  target, noted for completeness.
+
+## Phase 3 fixes from first real-AE test pass (2026-09-25)
+
+1. **Keyboard delete removed.** Pressing Backspace/Delete with a knot selected produced
+   a real AE error dialog: *"internal verification failure, sorry! {PF_InvalidateRect
+   can only be called during valid events.}"* -- confirming the gap flagged above:
+   `PF_Event_KEYDOWN` does not hand back a context valid for `PF_InvalidateRect` the way
+   `DO_CLICK`/`DRAG` do. Per user request, removed `DoKeyDown` and the
+   `PF_Event_KEYDOWN` dispatch case entirely rather than debugging the event's actual
+   validity rules -- drag-off-the-bar deletion already covers the same need and is
+   confirmed working end-to-end.
+
+2. **Knots can now slide past one another and reorder.** `DoDrag` used to clamp a
+   dragged knot's position between its immediate neighbours ("Photoshop-like" by
+   assumption, never actually requested). User wants full reordering instead: drag red
+   past yellow to put red on the right. Fixed by dropping the neighbour clamp (only
+   clamping to the bar's own [0,1] extent) and re-deriving the dragged knot's index
+   after each reposition -- counting how many *other* knots sit strictly before its new
+   position gives exactly where it lands after `GradientData::SortKnots()`'s stable
+   sort (same trick already used in `DoClick` for a newly-inserted knot) -- then writing
+   that back into `continue_refcon[0]` so the next `DRAG` tick of the same gesture keeps
+   tracking the correct (possibly reordered) knot.
+
+3. **Colour dulling when sliding two knots close together -- a real, independently
+   found bug in the Phase 2 extrapolation policy, now exposed by free knot dragging.**
+   `EvaluateGradientExtrapolated` (`GradientRemap_Main.cpp`) used to treat *any* `t`
+   outside the user's outermost knots as "extrapolate past the boundary pair," using a
+   raw RGB-space point-slope formula `a + (b-a) * (t - a.position) / span`. In Phase 2,
+   knots were pinned at exactly 0 and 1, so "outside the knot range" only ever meant
+   "outside [0,1]" (genuine HDR/negative 32bpc overshoot) -- the two conditions were
+   indistinguishable and the design conflated them. Phase 3 lets knots sit anywhere, so
+   a normal in-gamut region beyond the user's last knot (e.g. luma 0.6-1.0 when the
+   last knot sits at 0.5) now *also* hit this branch, and per-channel colour value
+   divided by a shrinking `span` (as two knots are dragged close together) diverges
+   without bound -- a mathematical inevitability of two-point extrapolation, not a
+   rounding bug -- producing visibly distorted/dulled colour in the "held" region well
+   before the knots actually touched.
+   **Fix**: only take the true-extrapolation branch when `t` is itself outside `[0,1]`
+   (the only way that can happen is unclamped 32bpc float HDR/negative source data, per
+   the original brief's clamp-toggle intent) with an added minimum-span guard
+   (`kMinExtrapolationSpan = 1/1024`) even there; for `t` within `[0,1]` -- the *only*
+   reachable case for 8bpc/16bpc, and the overwhelmingly common case for 32bpc too --
+   defer entirely to `GradientRemap::EvaluateGradient`, which already holds the nearest
+   end knot's colour flat when `t` is outside the knot range. This matches every
+   conventional gradient editor (a knot doesn't need to sit at position 0 or 1) and
+   completely removes the near-zero-span instability for normal in-gamut rendering.
+
+## UI label rename: Colour Space / Interpolation / Native (2026-09-25)
+
+User feedback: "Naive" read as a poor word choice for the blend-mode popup item, and the
+two popup titles' names didn't match what they actually control -- "Path" is the
+concept AE itself calls "Interpolation" for keyframes (the curve shape: Linear/Bezier/
+Hold-like), while what was labelled "Interpolation" actually just picks a colour space.
+
+Renamed, display text only:
+- "Interpolation" (OKLCH/Naive/Linear Light) -> **"Colour Space"**; "Naive" -> **"Native"**.
+- "Path" (Cubic/Ease/Linear/Step) -> **"Interpolation"**.
+
+Deliberately did NOT rename the underlying C++ identifiers (`GRADREMAP_INTERP_MODE`,
+`INTERP_MODE_DISK_ID`, `GRADREMAP_PATH`, `PATH_DISK_ID`, core `InterpMode`/`InterpPath`
+enums, `interpolation_mode`/`path` fields in `GradientData`) -- unlike the earlier
+"Smooth"->"Ease" rename, these internal names are still accurate descriptions of what
+each thing technically does (one picks a colour space, the other picks a curve shape)
+regardless of what AE happens to display; renaming them would ripple through the tested
+core/serialization code for a purely cosmetic win with real regression risk. Only
+`InterpModePopup_NAIVE` -> `InterpModePopup_NATIVE` was renamed (a small,
+AE-popup-layer-only constant whose old name was literally the word being complained
+about). Comments were added at both `GradientRemap.h` enum declarations and the
+`PF_ADD_POPUP` call sites cross-referencing the internal name vs. the AE-displayed
+label, so this intentional mismatch doesn't read as an oversight later.
+
+## Gradient moved to the top of the param list (2026-09-25)
+
+User request: the "Gradient" bar should be the first thing seen/edited, not buried below
+"Colour Space"/"Interpolation". `params[]` is strictly positional (assigned by
+`PF_ADD_*` call order in `ParamsSetup`, not by the `GRADREMAP_*` enum names we happen to
+use for readability) -- moved the `PF_ADD_ARBITRARY2("Gradient", ...)` call to be first
+in `ParamsSetup`, and reordered the `GRADREMAP_*` enum in `GradientRemap.h` to match
+(`GRADREMAP_GRADIENT` now sits right after `GRADREMAP_INPUT`). Disk IDs
+(`GRADIENT_DISK_ID` etc.) were left untouched -- unlike the earlier "Interpolation"
+popup item reorder, reordering whole *params* (each with its own disk ID) is safe:
+AE matches a project's saved values to params by disk ID, not by position, so an
+existing effect instance's settings won't silently reinterpret differently after this
+change the way a same-param popup-choice reorder can.
+
+## CSV export/import (2026-09-25)
+
+Added "Save Gradient..."/"Load Gradient..." buttons (`GRADREMAP_SAVE_BUTTON`/
+`GRADREMAP_LOAD_BUTTON`) exporting/importing the knot list as a plain CSV file --
+delivers the "CSV export utility (TouchDesigner Table-DAT compatible)" nice-to-have from
+the original scope, extended to include import per user request.
+
+**Format** (`GradientRemap/src/core/GradientCSV.h`/`.cpp`, in `GradientRemapCore` so it's
+unit-tested like everything else): a header row `position,r,g,b,a` followed by one row
+per knot as decimal floats, working-space colour values (no gamma conversion, same
+WYSIWYG convention as everywhere else). Deliberately does NOT round-trip
+`interpolation_mode`/`path` -- those are separate stock AE popups, orthogonal to the
+knot list. Parsing tolerates a missing header row (if the first row's first field
+parses as a number, it's treated as data) so a TouchDesigner Table-DAT export/import or
+a hand-edited file both work without special-casing.
+
+**AE wiring**: `PF_ADD_BUTTON` + `PF_ParamFlag_SUPERVISE` (matching the vendored SDK's
+`Paramarama` sample) routes a click to `PF_Cmd_USER_CHANGED_PARAM`, checked by
+`which_hit->param_index` against the two button params
+(`GradientRemap_SaveLoad.cpp`/`GradientRemap_HandleUserChangedParam`, dispatched from
+`EffectMain`). On success, the arb param's handle is reflattened in place (same
+`GradientRemap_ReflattenIntoHandle` helper the UI drag/click code already uses) with
+`PF_ChangeFlag_CHANGED_VALUE` set -- no manual `PF_InvalidateRect` needed here (unlike
+custom-UI event handling), since AE already refreshes dependent UI whenever a
+`PF_Cmd_USER_CHANGED_PARAM` handler sets another param's change flags; deliberately
+avoided given `PF_InvalidateRect` errored when called from the wrong context earlier
+this project (keyboard-delete's `PF_Event_KEYDOWN` bug, see above).
+
+**File dialogs**: native `NSSavePanel`/`NSOpenPanel`, macOS-only
+(`GradientRemap_FileDialog.h`/`.mm`, Objective-C++, `runModal` synchronously --
+same assumption `PF_AppColorPickerDialog`'s synchronous call already relies on
+elsewhere). Deliberately does not restrict file type via `allowedFileTypes`
+(deprecated) or `allowedContentTypes` (needs macOS 11+, an SDK-version dependency this
+project has no stated minimum-macOS floor to justify) -- a wrong file just fails
+`ParseGradientKnotsCSV` with a clear native alert instead. Requires enabling the
+`OBJCXX` CMake language and linking `Cocoa.framework`, both gated behind `if(APPLE)` in
+`CMakeLists.txt`, matching this project's existing macOS-only scope. A Windows build
+would need a common-dialog equivalent here before Save/Load could work there.
+
+Parse failures (wrong column count, non-numeric field, knot count outside
+`[kMinKnots, kMaxKnots]`) and file I/O failures surface via a native AE alert
+(`out_data->return_msg` + `PF_OutFlag_DISPLAY_ERROR_MESSAGE`, skipped under Premiere per
+the same guard used elsewhere), never a silent no-op or a crash.
+
 ## Building and testing (Phase 1, today)
 
 ```sh

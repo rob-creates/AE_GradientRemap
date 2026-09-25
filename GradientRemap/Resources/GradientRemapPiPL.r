@@ -47,8 +47,14 @@ resource 'PiPL' (16000) {
         AE_Effect_Global_OutFlags {
             // Must equal the OR of every out_flags bit set in GlobalSetup()
             // (AE_Effect.h): PF_OutFlag_DEEP_COLOR_AWARE (1<<25) |
-            // PF_OutFlag_PIX_INDEPENDENT (1<<10) | PF_OutFlag_USE_OUTPUT_EXTENT (1<<6).
-            0x02000440
+            // PF_OutFlag_PIX_INDEPENDENT (1<<10) | PF_OutFlag_USE_OUTPUT_EXTENT (1<<6) |
+            // PF_OutFlag_CUSTOM_UI (1<<15). Phase 3 (2026-09-25): forgetting to mirror
+            // GlobalSetup()'s added PF_OutFlag_CUSTOM_UI bit here made the gradient-bar
+            // arbitrary-data param's row disappear entirely from the Effect Controls
+            // Window (not just fail to draw) -- AE reads the PiPL's declared out_flags,
+            // not GlobalSetup()'s actual runtime value, to decide whether to reserve any
+            // custom-UI space at all. See docs/DESIGN.md.
+            0x02008440
         },
         AE_Effect_Global_OutFlags_2 {
             // Must equal the OR of every out_flags2 bit set in GlobalSetup():

@@ -33,28 +33,49 @@ namespace {
 // requiring the user to understand or choose a luma model.
 float ComputeLuma(float r, float g, float b) { return 0.2126f * r + 0.7152f * g + 0.0722f * b; }
 
-// In-range blending goes through the tested GradientRemapCore dispatch (respects the
-// selected interpolation mode). Outside the authored knot range, we linearly extend
-// from the boundary pair -- a plugin-layer policy (not a GradientRemapCore concern; see
-// Interpolation.h) so 32bpc HDR/negative luma values can extrapolate past the chosen
-// stop colours instead of flattening, per the original brief's clamp-toggle intent.
+// Minimum knot-pair span (in position units) below which we refuse to use that pair to
+// derive an extrapolation slope (see EvaluateGradientExtrapolated) -- any nonzero colour
+// difference divided by a near-zero span blows up toward +/-infinity, which is a
+// mathematical inevitability of two-point extrapolation, not a fixable rounding error.
+constexpr float kMinExtrapolationSpan = 1.0f / 1024.0f;
+
+// In-range blending (t within [0,1], the overwhelming common case -- and the ONLY case
+// reachable for 8bpc/16bpc, since Rec.709 luma of any valid normalized pixel is
+// inherently in [0,1]) goes straight to GradientRemapCore's EvaluateGradient, which
+// already holds the nearest end knot's colour flat when t falls outside the user's
+// placed knot range -- exactly matching Photoshop/Cinema 4D: a knot doesn't need to sit
+// at position 0 or 1 for gradient editing to feel normal.
+//
+// True extrapolation -- linearly extending past the boundary knot pair's own colours --
+// is reserved for t genuinely outside [0,1]: only reachable via unclamped 32bpc float
+// HDR/negative source values, per the original brief's clamp-toggle intent. Bug fixed
+// 2026-09-25: this used to extrapolate any time t was merely outside the *knot* range,
+// even when knots didn't span [0,1] and t was itself perfectly in-range -- so dragging
+// two knots close together in the Phase 3 UI (shrinking the boundary pair's span toward
+// zero) visibly distorted the "held" colour past the last knot, since that region was
+// being extrapolated using an increasingly unstable near-zero-span slope instead of
+// simply holding the last knot's colour flat.
 RGBAf EvaluateGradientExtrapolated(const GradientData& g, float t, float working_space_gamma) {
     const auto& knots = g.knots;
-    if (t < knots.front().position) {
+    if (t < 0.0f && knots.size() >= 2) {
         const GradientKnot& a = knots[0];
         const GradientKnot& b = knots[1];
         float span = b.position - a.position;
-        float slope = (span > 0.0f) ? (t - a.position) / span : 0.0f;
-        return RGBAf{a.r + (b.r - a.r) * slope, a.g + (b.g - a.g) * slope, a.b + (b.b - a.b) * slope,
-                     a.a + (b.a - a.a) * slope};
+        if (span > kMinExtrapolationSpan) {
+            float slope = (t - a.position) / span;
+            return RGBAf{a.r + (b.r - a.r) * slope, a.g + (b.g - a.g) * slope, a.b + (b.b - a.b) * slope,
+                         a.a + (b.a - a.a) * slope};
+        }
     }
-    if (t > knots.back().position) {
+    if (t > 1.0f && knots.size() >= 2) {
         const GradientKnot& a = knots[knots.size() - 2];
         const GradientKnot& b = knots.back();
         float span = b.position - a.position;
-        float slope = (span > 0.0f) ? (t - a.position) / span : 1.0f;
-        return RGBAf{a.r + (b.r - a.r) * slope, a.g + (b.g - a.g) * slope, a.b + (b.b - a.b) * slope,
-                     a.a + (b.a - a.a) * slope};
+        if (span > kMinExtrapolationSpan) {
+            float slope = (t - a.position) / span;
+            return RGBAf{a.r + (b.r - a.r) * slope, a.g + (b.g - a.g) * slope, a.b + (b.b - a.b) * slope,
+                         a.a + (b.a - a.a) * slope};
+        }
     }
     return GradientRemap::EvaluateGradient(g, t, working_space_gamma);
 }
@@ -235,32 +256,21 @@ PF_Err RemapPixelFloat(void* refcon, A_long /*x*/, A_long /*y*/, PF_PixelFloat* 
 
 PF_Err BuildGradientFromParams(PF_InData* in_data, GradientData* gradient) {
     PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
-    PF_ParamDef interp_mode_param, path_param, knot_color[4], knot_pos[4];
+    PF_ParamDef interp_mode_param, path_param, gradient_param;
     AEFX_CLR_STRUCT(interp_mode_param);
     AEFX_CLR_STRUCT(path_param);
-    for (int i = 0; i < 4; ++i) {
-        AEFX_CLR_STRUCT(knot_color[i]);
-        AEFX_CLR_STRUCT(knot_pos[i]);
-    }
+    AEFX_CLR_STRUCT(gradient_param);
 
     ERR(PF_CHECKOUT_PARAM(
         in_data, GRADREMAP_INTERP_MODE, in_data->current_time, in_data->time_step, in_data->time_scale, &interp_mode_param));
     ERR(PF_CHECKOUT_PARAM(
         in_data, GRADREMAP_PATH, in_data->current_time, in_data->time_step, in_data->time_scale, &path_param));
-
-    const int color_ids[4] = {GRADREMAP_KNOT0_COLOR, GRADREMAP_KNOT1_COLOR, GRADREMAP_KNOT2_COLOR, GRADREMAP_KNOT3_COLOR};
-    const int pos_ids[4] = {GRADREMAP_KNOT0_POS, GRADREMAP_KNOT1_POS, GRADREMAP_KNOT2_POS, GRADREMAP_KNOT3_POS};
-
-    for (int i = 0; i < 4 && !err; ++i) {
-        ERR(PF_CHECKOUT_PARAM(in_data, color_ids[i], in_data->current_time, in_data->time_step, in_data->time_scale,
-                               &knot_color[i]));
-    }
-    for (int i = 0; i < 4 && !err; ++i) {
-        ERR(PF_CHECKOUT_PARAM(in_data, pos_ids[i], in_data->current_time, in_data->time_step, in_data->time_scale,
-                               &knot_pos[i]));
-    }
+    ERR(PF_CHECKOUT_PARAM(
+        in_data, GRADREMAP_GRADIENT, in_data->current_time, in_data->time_step, in_data->time_scale, &gradient_param));
 
     if (!err) {
+        *gradient = GradientRemap_UnflattenArbHandle(in_data, gradient_param.u.arb_d.value);
+
         switch (interp_mode_param.u.pd.value) {
             case InterpModePopup_LINEAR_LIGHT:
                 gradient->interpolation_mode = InterpMode::LinearLight;
@@ -268,7 +278,7 @@ PF_Err BuildGradientFromParams(PF_InData* in_data, GradientData* gradient) {
             case InterpModePopup_OKLCH:
                 gradient->interpolation_mode = InterpMode::OKLCH;
                 break;
-            case InterpModePopup_NAIVE:
+            case InterpModePopup_NATIVE:
             default:
                 gradient->interpolation_mode = InterpMode::NaiveLerp;
                 break;
@@ -289,26 +299,11 @@ PF_Err BuildGradientFromParams(PF_InData* in_data, GradientData* gradient) {
                 gradient->path = InterpPath::Cubic;
                 break;
         }
-
-        gradient->knots.clear();
-        for (int i = 0; i < 4; ++i) {
-            GradientKnot k{};
-            k.position = static_cast<float>(knot_pos[i].u.fs_d.value);
-            k.r = knot_color[i].u.cd.value.red / 255.0f;
-            k.g = knot_color[i].u.cd.value.green / 255.0f;
-            k.b = knot_color[i].u.cd.value.blue / 255.0f;
-            k.a = 1.0f; // stock PF_ADD_COLOR has no alpha channel -- see file header note
-            gradient->knots.push_back(k);
-        }
-        gradient->SortKnots();
     }
 
     ERR2(PF_CHECKIN_PARAM(in_data, &interp_mode_param));
     ERR2(PF_CHECKIN_PARAM(in_data, &path_param));
-    for (int i = 0; i < 4; ++i) {
-        ERR2(PF_CHECKIN_PARAM(in_data, &knot_color[i]));
-        ERR2(PF_CHECKIN_PARAM(in_data, &knot_pos[i]));
-    }
+    ERR2(PF_CHECKIN_PARAM(in_data, &gradient_param));
 
     return err;
 }
@@ -368,7 +363,8 @@ static PF_Err About(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* /*par
 
 static PF_Err GlobalSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* /*params*/[], PF_LayerDef* /*output*/) {
     out_data->my_version = PF_VERSION(MAJOR_VERSION, MINOR_VERSION, BUG_VERSION, STAGE_VERSION, BUILD_VERSION);
-    out_data->out_flags |= PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT;
+    out_data->out_flags |= PF_OutFlag_DEEP_COLOR_AWARE | PF_OutFlag_PIX_INDEPENDENT | PF_OutFlag_USE_OUTPUT_EXTENT |
+                            PF_OutFlag_CUSTOM_UI;
     out_data->out_flags2 = PF_OutFlag2_FLOAT_COLOR_AWARE | PF_OutFlag2_SUPPORTS_SMART_RENDER |
                             PF_OutFlag2_SUPPORTS_THREADED_RENDERING;
     GradientRemap_RegisterWithAEGP(in_data); // enables the real working-space query in SmartRender
@@ -379,34 +375,31 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
     PF_Err err = PF_Err_NONE;
     PF_ParamDef def;
 
+    // Phase 3 custom gradient-bar UI (see docs/DESIGN.md): the knot list lives entirely
+    // in this one arbitrary-data param, drawn/edited by GradientRemap_UI.cpp. Its default
+    // handle is the same 2-knot black->white GradientData::Default() every other code
+    // path uses (ArbNew falls back to the same default if this ever fails). Listed first
+    // (2026-09-25, user request) so the gradient bar is the first thing seen/edited.
     AEFX_CLR_STRUCT(def);
-    PF_ADD_POPUP("Interpolation", 3, InterpModePopup_NAIVE, "Naive|Linear Light|OKLCH", INTERP_MODE_DISK_ID);
+    ERR(GradientRemap_CreateDefaultArbHandle(in_data, &def.u.arb_d.dephault));
+    PF_ADD_ARBITRARY2("Gradient", kGradientBarWidth, kGradientUITotalHeight, 0,
+                       PF_PUI_CONTROL | PF_PUI_DONT_ERASE_CONTROL, def.u.arb_d.dephault, GRADIENT_DISK_ID,
+                       GRADIENT_ARB_REFCON);
 
-    // Subset of Cinema 4D's gradient path options (see GradientRemap.h) -- orthogonal to
-    // "Interpolation" above, which only controls the colour SPACE the blend happens in.
-    // Cubic first/default per user preference: smoothest path through multiple knots.
+    // Displayed as "Colour Space" (2026-09-25, user feedback) -- picks which colour
+    // space the blend math happens in; kept as GRADREMAP_INTERP_MODE/InterpMode
+    // internally (see GradientRemap.h). "Naive" renamed to "Native".
     AEFX_CLR_STRUCT(def);
-    PF_ADD_POPUP("Path", 4, InterpPathPopup_CUBIC, "Cubic|Ease|Linear|Step", PATH_DISK_ID);
+    PF_ADD_POPUP("Colour Space", 3, InterpModePopup_NATIVE, "OKLCH|Native|Linear Light", INTERP_MODE_DISK_ID);
 
+    // Displayed as "Interpolation" (2026-09-25, user feedback) -- picks the
+    // interpolation path/curve shape between knots; kept as GRADREMAP_PATH/InterpPath
+    // internally (see GradientRemap.h). Subset of Cinema 4D's gradient path options
+    // (Blend and Cubic Bias not implemented), orthogonal to "Colour Space" above, which
+    // only controls the colour SPACE the blend happens in. Cubic first/default per user
+    // preference: smoothest path through multiple knots.
     AEFX_CLR_STRUCT(def);
-    PF_ADD_COLOR("Knot 0 Colour", 0, 0, 0, KNOT0_COLOR_DISK_ID);
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_FLOAT_SLIDERX("Knot 0 Position", 0.0, 1.0, 0.0, 1.0, 0.0, 3, 0, 0, KNOT0_POS_DISK_ID);
-
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_COLOR("Knot 1 Colour", 191, 26, 26, KNOT1_COLOR_DISK_ID);
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_FLOAT_SLIDERX("Knot 1 Position", 0.0, 1.0, 0.0, 1.0, 0.33f, 3, 0, 0, KNOT1_POS_DISK_ID);
-
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_COLOR("Knot 2 Colour", 242, 204, 26, KNOT2_COLOR_DISK_ID);
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_FLOAT_SLIDERX("Knot 2 Position", 0.0, 1.0, 0.0, 1.0, 0.67f, 3, 0, 0, KNOT2_POS_DISK_ID);
-
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_COLOR("Knot 3 Colour", 255, 255, 255, KNOT3_COLOR_DISK_ID);
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_FLOAT_SLIDERX("Knot 3 Position", 0.0, 1.0, 0.0, 1.0, 1.0, 3, 0, 0, KNOT3_POS_DISK_ID);
+    PF_ADD_POPUP("Interpolation", 4, InterpPathPopup_CUBIC, "Cubic|Ease|Linear|Step", PATH_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
     PF_ADD_CHECKBOXX("Clamp Range (32bpc)", FALSE, 0, CLAMP_INPUT_DISK_ID);
@@ -421,7 +414,34 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
     AEFX_CLR_STRUCT(def);
     PF_ADD_FLOAT_SLIDERX("Debanding Threshold", 0.0, 1.0, 0.0, 1.0, 0.5f, 2, 0, 0, DEBAND_THRESHOLD_DISK_ID);
 
+    // Export/import the knot list as a plain CSV file (see ../core/GradientCSV.h and
+    // GradientRemap_SaveLoad.cpp). PF_ParamFlag_SUPERVISE is what routes a click to
+    // PF_Cmd_USER_CHANGED_PARAM -- matches the vendored SDK's own Paramarama sample.
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_BUTTON("Save Gradient...", "Save Gradient...", 0, PF_ParamFlag_SUPERVISE, SAVE_BUTTON_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_BUTTON("Load Gradient...", "Load Gradient...", 0, PF_ParamFlag_SUPERVISE, LOAD_BUTTON_DISK_ID);
+
     out_data->num_params = GRADREMAP_NUM_PARAMS;
+
+    if (!err) {
+        PF_CustomUIInfo ci;
+        AEFX_CLR_STRUCT(ci);
+        ci.events = PF_CustomEFlag_EFFECT;
+
+        ci.comp_ui_width = ci.comp_ui_height = 0;
+        ci.comp_ui_alignment = PF_UIAlignment_NONE;
+
+        ci.layer_ui_width = ci.layer_ui_height = 0;
+        ci.layer_ui_alignment = PF_UIAlignment_NONE;
+
+        ci.preview_ui_width = ci.preview_ui_height = 0;
+        ci.preview_ui_alignment = PF_UIAlignment_NONE;
+
+        ERR((*(in_data->inter.register_ui))(in_data->effect_ref, &ci));
+    }
+
     return err;
 }
 
@@ -518,6 +538,29 @@ PF_Err EffectMain(PF_Cmd cmd, PF_InData* in_data, PF_OutData* out_data, PF_Param
                 break;
             case PF_Cmd_SMART_RENDER:
                 err = SmartRender(in_data, out_data, reinterpret_cast<PF_SmartRenderExtra*>(extra));
+                break;
+            case PF_Cmd_EVENT:
+                err = GradientRemap_HandleEvent(in_data, out_data, params, output, reinterpret_cast<PF_EventExtra*>(extra));
+                break;
+            case PF_Cmd_ARBITRARY_CALLBACK:
+                err = GradientRemap_HandleArbitrary(in_data, out_data, params, output,
+                                                     reinterpret_cast<PF_ArbParamsExtra*>(extra));
+                break;
+            case PF_Cmd_SEQUENCE_SETUP:
+                err = GradientRemap_SequenceSetup(in_data, out_data);
+                break;
+            case PF_Cmd_SEQUENCE_SETDOWN:
+                err = GradientRemap_SequenceSetdown(in_data, out_data);
+                break;
+            case PF_Cmd_SEQUENCE_RESETUP:
+                err = GradientRemap_SequenceResetup(in_data, out_data);
+                break;
+            case PF_Cmd_SEQUENCE_FLATTEN:
+                err = GradientRemap_SequenceFlatten(in_data, out_data);
+                break;
+            case PF_Cmd_USER_CHANGED_PARAM:
+                err = GradientRemap_HandleUserChangedParam(in_data, out_data, params,
+                                                             reinterpret_cast<const PF_UserChangedParamExtra*>(extra));
                 break;
         }
     } catch (PF_Err& thrown_err) {

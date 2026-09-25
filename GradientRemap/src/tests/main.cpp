@@ -12,6 +12,7 @@
 #include <iostream>
 #include <string>
 
+#include "../core/GradientCSV.h"
 #include "../core/GradientData.h"
 #include "../core/Interpolation.h"
 
@@ -300,6 +301,42 @@ void TestPathCubicOKLCHNoHueOvershoot() {
           "OKLCH+Cubic: hue does not overshoot past either endpoint on the green->yellow segment (no 'cyan blip')");
 }
 
+void TestCSVRoundTrip() {
+    GradientData g;
+    g.knots = {
+        {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+        {0.3f, 0.8f, 0.1f, 0.2f, 0.5f},
+        {1.0f, 1.0f, 1.0f, 1.0f, 1.0f},
+    };
+
+    std::string csv = GradientKnotsToCSV(g);
+    Check(csv.rfind("position,r,g,b,a\n", 0) == 0, "CSV: starts with the expected header row");
+
+    auto parsed = ParseGradientKnotsCSV(csv);
+    Check(parsed.has_value(), "CSV: round-tripped output parses back successfully");
+    if (parsed) {
+        Check(parsed->size() == g.knots.size(), "CSV: round trip preserves knot count");
+        for (size_t i = 0; i < g.knots.size() && i < parsed->size(); ++i) {
+            Check(Near((*parsed)[i].position, g.knots[i].position) && Near((*parsed)[i].r, g.knots[i].r) &&
+                      Near((*parsed)[i].g, g.knots[i].g) && Near((*parsed)[i].b, g.knots[i].b) &&
+                      Near((*parsed)[i].a, g.knots[i].a),
+                  "CSV: round trip preserves knot " + std::to_string(i) + "'s values");
+        }
+    }
+
+    // TouchDesigner Table-DAT compatibility: a headerless numeric-first-row file should
+    // still parse (the header-detection probe falls through to data parsing).
+    auto headerless = ParseGradientKnotsCSV("0.0,0.0,0.0,0.0,1.0\n1.0,1.0,1.0,1.0,1.0\n");
+    Check(headerless.has_value() && headerless->size() == 2, "CSV: tolerates a missing header row");
+
+    Check(!ParseGradientKnotsCSV("position,r,g,b,a\n0.0,0.0,0.0\n").has_value(),
+          "CSV: rejects a row with the wrong column count");
+    Check(!ParseGradientKnotsCSV("position,r,g,b,a\nnot_a_number,0.0,0.0,0.0,1.0\n").has_value(),
+          "CSV: rejects a non-numeric field");
+    Check(!ParseGradientKnotsCSV("position,r,g,b,a\n0.0,0.0,0.0,0.0,1.0\n").has_value(),
+          "CSV: rejects a single-knot file (below GradientData::kMinKnots)");
+}
+
 void RunTests() {
     TestFlattenRoundTrip();
     TestWysiwygEndpoints();
@@ -310,6 +347,7 @@ void RunTests() {
     TestPathStepHoldsSegmentStart();
     TestPathCubicReducesRidgeAtInteriorKnot();
     TestPathCubicOKLCHNoHueOvershoot();
+    TestCSVRoundTrip();
 
     std::cout << "\n" << (g_failures == 0 ? "ALL TESTS PASSED" : std::to_string(g_failures) + " TEST(S) FAILED") << "\n";
 }
