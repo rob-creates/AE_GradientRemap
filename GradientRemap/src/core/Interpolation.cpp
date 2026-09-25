@@ -5,13 +5,18 @@
 
 namespace GradientRemap {
 
-namespace {
-
 float Lerp(float a, float b, float t) { return a + (b - a) * t; }
 
 float ClampUnit(float v) { return std::min(1.0f, std::max(0.0f, v)); }
 
 float SmoothStep(float t) { return t * t * (3.0f - 2.0f * t); }
+
+namespace {
+
+// Point-slope reflection: the value at `far` reflected through `near` (2*near - far).
+// Used for Catmull-Rom phantom boundary points (ReflectKnot) and the equivalent per-
+// channel/per-quantity constructions in the LinearLight/OKLCH cubic blends below.
+float Reflect(float near, float far) { return 2.0f * near - far; }
 
 // Cubic Hermite basis: given values p1/p2 at t=0/t=1 and explicit tangents m1/m2 there.
 // Plain Catmull-Rom is the special case m1=0.5*(p2-p0), m2=0.5*(p3-p1) -- passing those
@@ -142,16 +147,29 @@ namespace {
 constexpr float kTwoPi = 6.28318530717958647692f;
 constexpr float kPi = 3.14159265358979323846f;
 
+// Below this chroma, atan2's hue angle is meaningless noise (e.g. greys/black/white) --
+// shared by both the pairwise (BlendOKLCH) and cubic (BlendOKLCHCubic) OKLCH blends so
+// the "what counts as achromatic" threshold can't drift between them.
+constexpr float kChromaEpsilon = 1e-4f;
+
+bool IsAchromatic(float chroma) { return chroma < kChromaEpsilon; }
+
+// Wrap `h` to lie within (ref-pi, ref+pi] -- i.e. the representative of h's angle class
+// closest to `ref`. With ref=0 this is the usual "wrap to principal range" (LerpHue and
+// BlendOKLCHCubic's final hue both use it this way); with ref set to a running reference
+// hue, this instead *unwraps* h to stay continuous with that reference (BlendOKLCHCubic's
+// hueOrRef, so the spline's tangent maths never sees a fake 2*pi jump).
+float WrapRelativeTo(float h, float ref) {
+    while (h - ref > kPi) h -= kTwoPi;
+    while (h - ref < -kPi) h += kTwoPi;
+    return h;
+}
+
 // Shortest-path hue lerp: wrap the delta into (-pi, pi] before interpolating so hue
 // always takes the shorter way around the circle, then wrap the result back.
 float LerpHue(float h0, float h1, float t) {
-    float delta = h1 - h0;
-    while (delta > kPi) delta -= kTwoPi;
-    while (delta < -kPi) delta += kTwoPi;
-    float h = h0 + delta * t;
-    while (h > kPi) h -= kTwoPi;
-    while (h < -kPi) h += kTwoPi;
-    return h;
+    float delta = WrapRelativeTo(h1 - h0, 0.0f);
+    return WrapRelativeTo(h0 + delta * t, 0.0f);
 }
 
 // Phantom control point for Catmull-Rom at a gradient boundary: reflect the far knot
@@ -164,10 +182,10 @@ float LerpHue(float h0, float h1, float t) {
 GradientKnot ReflectKnot(const GradientKnot& near, const GradientKnot& far) {
     GradientKnot k{};
     k.position = near.position;
-    k.r = 2.0f * near.r - far.r;
-    k.g = 2.0f * near.g - far.g;
-    k.b = 2.0f * near.b - far.b;
-    k.a = 2.0f * near.a - far.a;
+    k.r = Reflect(near.r, far.r);
+    k.g = Reflect(near.g, far.g);
+    k.b = Reflect(near.b, far.b);
+    k.a = Reflect(near.a, far.a);
     return k;
 }
 
@@ -208,12 +226,11 @@ RGBAf BlendOKLCH(const GradientKnot& a, const GradientKnot& b, float t, float ga
     // Degenerate hue (near-zero chroma, e.g. greys/black/white) makes atan2's angle
     // meaningless noise; if either side is essentially achromatic, just take the
     // other side's hue instead of lerping toward/away from an arbitrary angle.
-    constexpr float kChromaEpsilon = 1e-4f;
-    if (lchA.C < kChromaEpsilon && lchB.C < kChromaEpsilon) {
+    if (IsAchromatic(lchA.C) && IsAchromatic(lchB.C)) {
         lchOut.h = 0.0f;
-    } else if (lchA.C < kChromaEpsilon) {
+    } else if (IsAchromatic(lchA.C)) {
         lchOut.h = lchB.h;
-    } else if (lchB.C < kChromaEpsilon) {
+    } else if (IsAchromatic(lchB.C)) {
         lchOut.h = lchA.h;
     } else {
         lchOut.h = LerpHue(lchA.h, lchB.h, t);
@@ -256,8 +273,12 @@ RGBAf BlendLinearLightCubic(const GradientKnot* p0, const GradientKnot& a, const
                      WorkingSpaceTransform::ToLinear(k.b, gamma), k.a};
     };
     RGBAf linA = toLin(a), linB = toLin(b);
-    RGBAf linP0 = p0 ? toLin(*p0) : RGBAf{2 * linA.r - linB.r, 2 * linA.g - linB.g, 2 * linA.b - linB.b, 2 * a.a - b.a};
-    RGBAf linP3 = p3 ? toLin(*p3) : RGBAf{2 * linB.r - linA.r, 2 * linB.g - linA.g, 2 * linB.b - linA.b, 2 * b.a - a.a};
+    RGBAf linP0 = p0 ? toLin(*p0)
+                     : RGBAf{Reflect(linA.r, linB.r), Reflect(linA.g, linB.g), Reflect(linA.b, linB.b),
+                             Reflect(a.a, b.a)};
+    RGBAf linP3 = p3 ? toLin(*p3)
+                     : RGBAf{Reflect(linB.r, linA.r), Reflect(linB.g, linA.g), Reflect(linB.b, linA.b),
+                             Reflect(b.a, a.a)};
 
     float lr = MonotoneCubicScalar(linP0.r, linA.r, linB.r, linP3.r, t);
     float lg = MonotoneCubicScalar(linP0.g, linA.g, linB.g, linP3.g, t);
@@ -279,14 +300,8 @@ RGBAf BlendOKLCHCubic(const GradientKnot* p0, const GradientKnot& a, const Gradi
 
     // Reference hue for unwrapping/achromatic substitution: prefer the real segment
     // endpoints, same spirit as BlendOKLCH's pairwise handling.
-    constexpr float kChromaEpsilon = 1e-4f;
-    float refH = (lchA.C >= kChromaEpsilon) ? lchA.h : (lchB.C >= kChromaEpsilon ? lchB.h : 0.0f);
-    auto unwrap = [refH](float h) {
-        while (h - refH > kPi) h -= kTwoPi;
-        while (h - refH < -kPi) h += kTwoPi;
-        return h;
-    };
-    auto hueOrRef = [&](const OKLCH& c) { return c.C >= kChromaEpsilon ? unwrap(c.h) : refH; };
+    float refH = IsAchromatic(lchA.C) ? (IsAchromatic(lchB.C) ? 0.0f : lchB.h) : lchA.h;
+    auto hueOrRef = [&](const OKLCH& c) { return IsAchromatic(c.C) ? refH : WrapRelativeTo(c.h, refH); };
     float hA = hueOrRef(lchA), hB = hueOrRef(lchB);
 
     OKLCH lchP0, lchP3;
@@ -295,29 +310,27 @@ RGBAf BlendOKLCHCubic(const GradientKnot* p0, const GradientKnot& a, const Gradi
         lchP0 = toLCH(*p0);
         hP0 = hueOrRef(lchP0);
     } else {
-        // Reflect in OKLCH space (L, C, and the already-unwrapped hue angle): 2*a - b.
-        lchP0 = OKLCH{2.0f * lchA.L - lchB.L, 2.0f * lchA.C - lchB.C, 0.0f};
-        hP0 = 2.0f * hA - hB;
+        // Reflect in OKLCH space (L, C, and the already-unwrapped hue angle).
+        lchP0 = OKLCH{Reflect(lchA.L, lchB.L), Reflect(lchA.C, lchB.C), 0.0f};
+        hP0 = Reflect(hA, hB);
     }
     if (p3) {
         lchP3 = toLCH(*p3);
         hP3 = hueOrRef(lchP3);
     } else {
-        lchP3 = OKLCH{2.0f * lchB.L - lchA.L, 2.0f * lchB.C - lchA.C, 0.0f};
-        hP3 = 2.0f * hB - hA;
+        lchP3 = OKLCH{Reflect(lchB.L, lchA.L), Reflect(lchB.C, lchA.C), 0.0f};
+        hP3 = Reflect(hB, hA);
     }
 
     OKLCH out;
     out.L = MonotoneCubicScalar(lchP0.L, lchA.L, lchB.L, lchP3.L, t);
     out.C = std::max(0.0f, MonotoneCubicScalar(lchP0.C, lchA.C, lchB.C, lchP3.C, t)); // cubic can overshoot below 0
-    out.h = MonotoneCubicScalar(hP0, hA, hB, hP3, t);
-    while (out.h > kPi) out.h -= kTwoPi;
-    while (out.h < -kPi) out.h += kTwoPi;
+    out.h = WrapRelativeTo(MonotoneCubicScalar(hP0, hA, hB, hP3, t), 0.0f);
 
     float lr, lg, lb;
     OKLabToLinearSRGB(OKLCHToOKLab(out), lr, lg, lb);
-    float alphaP0 = p0 ? p0->a : (2.0f * a.a - b.a);
-    float alphaP3 = p3 ? p3->a : (2.0f * b.a - a.a);
+    float alphaP0 = p0 ? p0->a : Reflect(a.a, b.a);
+    float alphaP3 = p3 ? p3->a : Reflect(b.a, a.a);
     float alpha = MonotoneCubicScalar(alphaP0, a.a, b.a, alphaP3, t);
     return RGBAf{WorkingSpaceTransform::ToWorkingSpace(lr, gamma), WorkingSpaceTransform::ToWorkingSpace(lg, gamma),
                  WorkingSpaceTransform::ToWorkingSpace(lb, gamma), alpha};

@@ -8,6 +8,13 @@ struct RGBAf {
     float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.0f;
 };
 
+// Small scalar helpers shared across the plugin (GradientRemap_Main.cpp,
+// GradientRemap_UI.cpp, GradientRemap_Arb.cpp) and the test harness, so each has exactly
+// one definition instead of independent copies that can drift apart.
+float ClampUnit(float v);
+float Lerp(float a, float b, float t);
+float SmoothStep(float t);
+
 // Working-space <-> linear-light transfer function. `gamma <= 0` (the default) uses
 // the precise sRGB piecewise EOTF/OETF -- this is the Phase 1 behaviour and what every
 // existing GradientRemapCoreTests case exercises. `gamma > 0` uses a plain power-law

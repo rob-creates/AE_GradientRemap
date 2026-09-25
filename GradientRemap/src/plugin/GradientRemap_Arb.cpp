@@ -16,10 +16,13 @@
 
 #include "GradientRemap.h"
 
+#include "../core/Interpolation.h"
+
 #include <cstring>
 
 using GradientRemap::GradientData;
 using GradientRemap::GradientKnot;
+using GradientRemap::Lerp;
 
 namespace {
 
@@ -81,6 +84,12 @@ PF_Err GradientRemap_CreateDefaultArbHandle(PF_InData* in_data, PF_Handle* arbHP
     if (!arbHP) return PF_Err_BAD_CALLBACK_PARAM;
     *arbHP = NewHandleFromGradient(in_data, GradientData::Default());
     return *arbHP ? PF_Err_NONE : PF_Err_OUT_OF_MEMORY;
+}
+
+PF_Err GradientRemap_WriteGradientAndMarkChanged(PF_InData* in_data, PF_ParamDef* params[], const GradientData& g) {
+    PF_Err err = GradientRemap_ReflattenIntoHandle(in_data, g, &params[GRADREMAP_GRADIENT]->u.arb_d.value);
+    params[GRADREMAP_GRADIENT]->uu.change_flags |= PF_ChangeFlag_CHANGED_VALUE;
+    return err;
 }
 
 namespace {
@@ -158,8 +167,6 @@ PF_Err ArbUnflatten(PF_InData* in_data, PF_ArbParamsExtra* extra) {
     return h ? PF_Err_NONE : PF_Err_OUT_OF_MEMORY;
 }
 
-float LerpF(float a, float b, float t) { return a + (b - a) * static_cast<float>(t); }
-
 PF_Err ArbInterp(PF_InData* in_data, PF_ArbParamsExtra* extra) {
     if (extra->u.interp_func_params.refconPV != GRADIENT_ARB_REFCON) {
         return PF_Err_INTERNAL_STRUCT_DAMAGED;
@@ -174,11 +181,11 @@ PF_Err ArbInterp(PF_InData* in_data, PF_ArbParamsExtra* extra) {
             GradientKnot& k = result.knots[i];
             const GradientKnot& l = left.knots[i];
             const GradientKnot& r = right.knots[i];
-            k.position = LerpF(l.position, r.position, static_cast<float>(t));
-            k.r = LerpF(l.r, r.r, static_cast<float>(t));
-            k.g = LerpF(l.g, r.g, static_cast<float>(t));
-            k.b = LerpF(l.b, r.b, static_cast<float>(t));
-            k.a = LerpF(l.a, r.a, static_cast<float>(t));
+            k.position = Lerp(l.position, r.position, static_cast<float>(t));
+            k.r = Lerp(l.r, r.r, static_cast<float>(t));
+            k.g = Lerp(l.g, r.g, static_cast<float>(t));
+            k.b = Lerp(l.b, r.b, static_cast<float>(t));
+            k.a = Lerp(l.a, r.a, static_cast<float>(t));
         }
         result.SortKnots();
     }

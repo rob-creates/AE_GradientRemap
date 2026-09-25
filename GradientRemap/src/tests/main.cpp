@@ -33,6 +33,15 @@ void Check(bool cond, const std::string& what) {
 
 bool Near(float a, float b, float eps = 1e-5f) { return std::fabs(a - b) <= eps; }
 
+const char* ModeName(InterpMode mode) {
+    switch (mode) {
+        case InterpMode::NaiveLerp: return "Naive";
+        case InterpMode::LinearLight: return "LinearLight";
+        case InterpMode::OKLCH: return "OKLCH";
+    }
+    return "Unknown";
+}
+
 void TestFlattenRoundTrip() {
     GradientData g;
     g.interpolation_mode = InterpMode::OKLCH;
@@ -82,7 +91,7 @@ void TestWysiwygEndpoints() {
         g.interpolation_mode = mode;
         RGBAf at0 = EvaluateGradient(g, 0.0f);
         RGBAf at1 = EvaluateGradient(g, 1.0f);
-        std::string modeName = mode == InterpMode::NaiveLerp ? "Naive" : mode == InterpMode::LinearLight ? "LinearLight" : "OKLCH";
+        std::string modeName = ModeName(mode);
         Check(Near(at0.r, 0.0f) && Near(at0.g, 0.0f) && Near(at0.b, 0.0f),
               modeName + ": t=0 exactly matches authored knot colour (WYSIWYG)");
         Check(Near(at1.r, 1.0f) && Near(at1.g, 1.0f) && Near(at1.b, 1.0f),
@@ -190,7 +199,7 @@ void TestPathCubicDegeneratesToLinearFor2Knots() {
     };
     for (InterpMode mode : {InterpMode::NaiveLerp, InterpMode::LinearLight, InterpMode::OKLCH}) {
         g.interpolation_mode = mode;
-        std::string modeName = mode == InterpMode::NaiveLerp ? "Naive" : mode == InterpMode::LinearLight ? "LinearLight" : "OKLCH";
+        std::string modeName = ModeName(mode);
         for (float t : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
             g.path = InterpPath::Linear;
             RGBAf viaLinear = EvaluateGradient(g, t);
@@ -359,7 +368,7 @@ void WritePPMStrip(const std::filesystem::path& path, const GradientData& g, int
         for (int x = 0; x < width; ++x) {
             float t = static_cast<float>(x) / static_cast<float>(width - 1);
             RGBAf c = EvaluateGradient(g, t);
-            auto to8 = [](float v) { return static_cast<unsigned char>(std::round(std::min(1.0f, std::max(0.0f, v)) * 255.0f)); };
+            auto to8 = [](float v) { return static_cast<unsigned char>(std::round(ClampUnit(v) * 255.0f)); };
             unsigned char rgb[3] = {to8(c.r), to8(c.g), to8(c.b)};
             f.write(reinterpret_cast<const char*>(rgb), 3);
         }

@@ -61,11 +61,7 @@ PF_Err HandleLoadButton(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* p
     g.knots = *parsed;
     g.SortKnots();
 
-    PF_Err err = GradientRemap_ReflattenIntoHandle(in_data, g, &params[GRADREMAP_GRADIENT]->u.arb_d.value);
-    if (!err) {
-        params[GRADREMAP_GRADIENT]->uu.change_flags |= PF_ChangeFlag_CHANGED_VALUE;
-    }
-    return err;
+    return GradientRemap_WriteGradientAndMarkChanged(in_data, params, g);
 }
 
 } // namespace

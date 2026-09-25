@@ -24,11 +24,10 @@
 #include <algorithm>
 #include <cmath>
 
+using GradientRemap::ClampUnit;
 using GradientRemap::EvaluateGradient;
 using GradientRemap::GradientData;
 using GradientRemap::GradientKnot;
-using GradientRemap::InterpMode;
-using GradientRemap::InterpPath;
 using GradientRemap::RGBAf;
 
 namespace {
@@ -56,42 +55,16 @@ float KnotScreenX(const BarGeometry& bar, float knot_position) {
 
 float PositionFromScreenX(const BarGeometry& bar, float screen_x) {
     if (bar.width <= 0) return 0.0f;
-    float t = (screen_x - static_cast<float>(bar.left)) / static_cast<float>(bar.width);
-    return t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    return ClampUnit((screen_x - static_cast<float>(bar.left)) / static_cast<float>(bar.width));
 }
 
 // Knot list from the arb param, with interpolation_mode/path overridden from the
-// separate stock popups -- mirrors BuildGradientFromParams in GradientRemap_Main.cpp,
-// but reads already-checked-out params[] directly (event handling never checks params
-// in/out itself; AE hands them over already resolved for the current time).
+// separate stock popups via the same mapping BuildGradientFromParams (GradientRemap_Main.cpp)
+// uses -- this reads already-checked-out params[] directly (event handling never checks
+// params in/out itself; AE hands them over already resolved for the current time).
 GradientData BuildGradientForUI(PF_InData* in_data, PF_ParamDef* params[]) {
     GradientData g = GradientRemap_UnflattenArbHandle(in_data, params[GRADREMAP_GRADIENT]->u.arb_d.value);
-
-    switch (params[GRADREMAP_INTERP_MODE]->u.pd.value) {
-        case InterpModePopup_LINEAR_LIGHT:
-            g.interpolation_mode = InterpMode::LinearLight;
-            break;
-        case InterpModePopup_OKLCH:
-            g.interpolation_mode = InterpMode::OKLCH;
-            break;
-        default:
-            g.interpolation_mode = InterpMode::NaiveLerp;
-            break;
-    }
-    switch (params[GRADREMAP_PATH]->u.pd.value) {
-        case InterpPathPopup_LINEAR:
-            g.path = InterpPath::Linear;
-            break;
-        case InterpPathPopup_STEP:
-            g.path = InterpPath::Step;
-            break;
-        case InterpPathPopup_EASE:
-            g.path = InterpPath::Ease;
-            break;
-        default:
-            g.path = InterpPath::Cubic;
-            break;
-    }
+    GradientRemap_ApplyInterpPopups(g, params[GRADREMAP_INTERP_MODE]->u.pd.value, params[GRADREMAP_PATH]->u.pd.value);
     return g;
 }
 
@@ -115,6 +88,20 @@ int HitTestKnot(const GradientData& g, const BarGeometry& bar, float mouse_h) {
         if (std::fabs(mouse_h - x) <= kKnotHitHalfWidth) return static_cast<int>(i);
     }
     return -1;
+}
+
+// After inserting a brand-new knot or repositioning an existing one to `position`, this
+// counts how many OTHER knots (excluding `exclude_index`, or -1 if the knot is new and
+// not yet in the list) sit strictly before it -- exactly where it lands after
+// GradientData::SortKnots()'s *stable* sort (ties keep insertion order, and the knot
+// being placed is always the last thing to move into that slot). Shared by DoClick's
+// new-knot insertion and DoDrag's reposition/reorder.
+int IndexAfterSortedInsert(const std::vector<GradientKnot>& knots, int exclude_index, float position) {
+    int index = 0;
+    for (size_t i = 0; i < knots.size(); ++i) {
+        if (static_cast<int>(i) != exclude_index && knots[i].position < position) ++index;
+    }
+    return index;
 }
 
 bool PointInBar(const BarGeometry& bar, float mouse_h, float mouse_v) {
@@ -157,12 +144,6 @@ PF_Err InvalidateWholeControl(PF_InData* in_data, PF_OutData* out_data, PF_Event
     PF_Rect inval(event_extra->effect_win.current_frame);
     ERR(suites.AppSuite4()->PF_InvalidateRect(event_extra->contextH, &inval));
     event_extra->evt_out_flags |= PF_EO_HANDLED_EVENT | PF_EO_UPDATE_NOW;
-    return err;
-}
-
-PF_Err WriteGradientBack(PF_InData* in_data, PF_ParamDef* params[], const GradientData& g) {
-    PF_Err err = GradientRemap_ReflattenIntoHandle(in_data, g, &params[GRADREMAP_GRADIENT]->u.arb_d.value);
-    params[GRADREMAP_GRADIENT]->uu.change_flags |= PF_ChangeFlag_CHANGED_VALUE;
     return err;
 }
 
@@ -217,8 +198,7 @@ PF_Err DrawEvent(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[]
             for (A_long col = 0; col < bar.width && !err; ++col) {
                 float t = static_cast<float>(col) / static_cast<float>(bar.width > 1 ? bar.width - 1 : 1);
                 RGBAf c = EvaluateGradient(g, t, gamma);
-                DRAWBOT_ColorRGBA stripColor = {std::max(0.0f, std::min(1.0f, c.r)), std::max(0.0f, std::min(1.0f, c.g)),
-                                                 std::max(0.0f, std::min(1.0f, c.b)), 1.0f};
+                DRAWBOT_ColorRGBA stripColor = {ClampUnit(c.r), ClampUnit(c.g), ClampUnit(c.b), 1.0f};
                 DRAWBOT_RectF32 colRect;
                 colRect.left = (float)(bar.left + col);
                 colRect.top = (float)bar.top;
@@ -322,7 +302,7 @@ PF_Err DoClick(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], 
                     g.knots[hit].r = picked.red;
                     g.knots[hit].g = picked.green;
                     g.knots[hit].b = picked.blue;
-                    err = WriteGradientBack(in_data, params, g);
+                    err = GradientRemap_WriteGradientAndMarkChanged(in_data, params, g);
                 }
             }
         } else {
@@ -336,10 +316,7 @@ PF_Err DoClick(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], 
         float t = PositionFromScreenX(bar, mouse_h);
         RGBAf c = EvaluateGradient(g, t, GradientRemap_QueryWorkingSpaceGamma(in_data));
 
-        int new_index = 0;
-        for (const auto& k : g.knots) {
-            if (k.position < t) ++new_index;
-        }
+        int new_index = IndexAfterSortedInsert(g.knots, -1, t);
 
         GradientKnot k{};
         k.position = t;
@@ -350,7 +327,7 @@ PF_Err DoClick(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], 
         g.knots.push_back(k);
         g.SortKnots(); // stable; ties keep insertion order, so new_index is still correct
 
-        err = WriteGradientBack(in_data, params, g);
+        err = GradientRemap_WriteGradientAndMarkChanged(in_data, params, g);
 
         if (seq) {
             seq->selected_knot_index = new_index;
@@ -386,10 +363,7 @@ PF_Err DoDrag(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], P
     // knots sit strictly before its new position `t` -- that count is exactly where it
     // lands after GradientData::SortKnots()'s *stable* sort (ties keep insertion order,
     // and the dragged knot is the last thing to move into that slot).
-    int new_index = 0;
-    for (size_t i = 0; i < g.knots.size(); ++i) {
-        if ((int)i != dragged_index && g.knots[i].position < t) ++new_index;
-    }
+    int new_index = IndexAfterSortedInsert(g.knots, dragged_index, t);
     g.knots[dragged_index].position = t;
     g.SortKnots();
     dragged_index = new_index;
@@ -407,7 +381,7 @@ PF_Err DoDrag(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], P
         g.knots.erase(g.knots.begin() + dragged_index);
     }
 
-    err = WriteGradientBack(in_data, params, g);
+    err = GradientRemap_WriteGradientAndMarkChanged(in_data, params, g);
 
     GradientUISeqData* seq = LockSeqData(in_data);
     if (seq) {

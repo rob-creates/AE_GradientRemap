@@ -16,15 +16,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 
 #include "../core/GradientData.h"
 #include "../core/Interpolation.h"
 
+using GradientRemap::ClampUnit;
 using GradientRemap::GradientData;
 using GradientRemap::GradientKnot;
 using GradientRemap::InterpMode;
 using GradientRemap::InterpPath;
 using GradientRemap::RGBAf;
+using GradientRemap::SmoothStep;
 
 namespace {
 
@@ -55,27 +58,25 @@ constexpr float kMinExtrapolationSpan = 1.0f / 1024.0f;
 // zero) visibly distorted the "held" colour past the last knot, since that region was
 // being extrapolated using an increasingly unstable near-zero-span slope instead of
 // simply holding the last knot's colour flat.
+// Point-slope colour extrapolation using the line through two knots, evaluated at `t`
+// (which may be outside [a.position, b.position]). Returns std::nullopt if the pair's
+// span is too small to safely derive a slope from (see kMinExtrapolationSpan) -- the
+// caller falls back to holding the nearest knot's colour flat.
+std::optional<RGBAf> ExtrapolateFromPair(const GradientKnot& a, const GradientKnot& b, float t) {
+    float span = b.position - a.position;
+    if (span <= kMinExtrapolationSpan) return std::nullopt;
+    float slope = (t - a.position) / span;
+    return RGBAf{a.r + (b.r - a.r) * slope, a.g + (b.g - a.g) * slope, a.b + (b.b - a.b) * slope,
+                 a.a + (b.a - a.a) * slope};
+}
+
 RGBAf EvaluateGradientExtrapolated(const GradientData& g, float t, float working_space_gamma) {
     const auto& knots = g.knots;
     if (t < 0.0f && knots.size() >= 2) {
-        const GradientKnot& a = knots[0];
-        const GradientKnot& b = knots[1];
-        float span = b.position - a.position;
-        if (span > kMinExtrapolationSpan) {
-            float slope = (t - a.position) / span;
-            return RGBAf{a.r + (b.r - a.r) * slope, a.g + (b.g - a.g) * slope, a.b + (b.b - a.b) * slope,
-                         a.a + (b.a - a.a) * slope};
-        }
+        if (auto c = ExtrapolateFromPair(knots[0], knots[1], t)) return *c;
     }
     if (t > 1.0f && knots.size() >= 2) {
-        const GradientKnot& a = knots[knots.size() - 2];
-        const GradientKnot& b = knots.back();
-        float span = b.position - a.position;
-        if (span > kMinExtrapolationSpan) {
-            float slope = (t - a.position) / span;
-            return RGBAf{a.r + (b.r - a.r) * slope, a.g + (b.g - a.g) * slope, a.b + (b.b - a.b) * slope,
-                         a.a + (b.a - a.a) * slope};
-        }
+        if (auto c = ExtrapolateFromPair(knots[knots.size() - 2], knots.back(), t)) return *c;
     }
     return GradientRemap::EvaluateGradient(g, t, working_space_gamma);
 }
@@ -89,9 +90,10 @@ struct RemapRefcon {
     const PF_EffectWorld* input_world; // only used by the 8bpc anti-banding blur (RemapPixel8)
 };
 
-float ClampUnit(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
-
-float SmoothStep01(float t) { return t * t * (3.0f - 2.0f * t); }
+// Normalize an integer channel value to [0,1] -- shared by SampleLumaAlpha8Clamped and
+// RemapPixel8/16 rather than each repeating `v / static_cast<float>(PF_MAX_CHANx)`.
+float Norm8(A_u_char v) { return v / static_cast<float>(PF_MAX_CHAN8); }
+float Norm16(A_u_short v) { return v / static_cast<float>(PF_MAX_CHAN16); }
 
 // Standard 8x8 Bayer ordered-dither matrix (all 64 values 0-63, unique). Stateless,
 // derived purely from (x,y).
@@ -136,9 +138,8 @@ LumaAlphaSample SampleLumaAlpha8Clamped(const PF_EffectWorld* world, A_long x, A
     A_long cy = y < 0 ? 0 : (y >= world->height ? world->height - 1 : y);
     const char* row = reinterpret_cast<const char*>(world->data) + static_cast<size_t>(cy) * static_cast<size_t>(world->rowbytes);
     const PF_Pixel8* pixel = reinterpret_cast<const PF_Pixel8*>(row) + cx;
-    float luma = ComputeLuma(pixel->red / static_cast<float>(PF_MAX_CHAN8), pixel->green / static_cast<float>(PF_MAX_CHAN8),
-                              pixel->blue / static_cast<float>(PF_MAX_CHAN8));
-    return {luma, pixel->alpha / static_cast<float>(PF_MAX_CHAN8)};
+    float luma = ComputeLuma(Norm8(pixel->red), Norm8(pixel->green), Norm8(pixel->blue));
+    return {luma, Norm8(pixel->alpha)};
 }
 
 struct BlurredLumaResult {
@@ -156,7 +157,7 @@ struct BlurredLumaResult {
 // range actually sampled, so the caller can tell whether this neighbourhood spans a
 // genuine colour transition rather than sub-LSB quantization noise -- see the threshold
 // gate in RemapPixel8.
-BlurredLumaResult BlurredLuma8(const PF_EffectWorld* world, A_long x, A_long y, float centerLuma) {
+BlurredLumaResult BlurredLuma8(const PF_EffectWorld* world, A_long x, A_long y, float centerLuma, float centerAlpha) {
     float weightedSum = 0.0f;
     float weightTotal = 0.0f;
     float lumaMin = centerLuma;
@@ -164,7 +165,10 @@ BlurredLumaResult BlurredLuma8(const PF_EffectWorld* world, A_long x, A_long y, 
     constexpr float kOpaqueEnough = 1.0f / 255.0f;
     for (A_long dy = -kBandingBlurRadius; dy <= kBandingBlurRadius; ++dy) {
         for (A_long dx = -kBandingBlurRadius; dx <= kBandingBlurRadius; ++dx) {
-            LumaAlphaSample s = SampleLumaAlpha8Clamped(world, x + dx, y + dy);
+            // (0,0) is the pixel already sampled by the caller -- reuse it instead of
+            // re-reading/re-converting the identical source pixel a second time.
+            LumaAlphaSample s = (dx == 0 && dy == 0) ? LumaAlphaSample{centerLuma, centerAlpha}
+                                                      : SampleLumaAlpha8Clamped(world, x + dx, y + dy);
             weightedSum += s.luma * s.alpha;
             weightTotal += s.alpha;
             if (s.alpha >= kOpaqueEnough) {
@@ -183,9 +187,8 @@ PF_Err RemapPixel8(void* refcon, A_long x, A_long y, PF_Pixel8* inP, PF_Pixel8* 
 
     float t;
     if (rc->dither) {
-        float centerLuma = ComputeLuma(inP->red / static_cast<float>(PF_MAX_CHAN8), inP->green / static_cast<float>(PF_MAX_CHAN8),
-                                        inP->blue / static_cast<float>(PF_MAX_CHAN8));
-        BlurredLumaResult blur = BlurredLuma8(rc->input_world, x, y, centerLuma);
+        float centerLuma = ComputeLuma(Norm8(inP->red), Norm8(inP->green), Norm8(inP->blue));
+        BlurredLumaResult blur = BlurredLuma8(rc->input_world, x, y, centerLuma, Norm8(inP->alpha));
 
         // Threshold gate: if the gradient's OUTPUT colour differs a lot between this
         // neighbourhood's darkest and lightest sampled luma, blurring would be averaging
@@ -197,15 +200,12 @@ PF_Err RemapPixel8(void* refcon, A_long x, A_long y, PF_Pixel8* inP, PF_Pixel8* 
         RGBAf atMax = EvaluateGradientExtrapolated(rc->gradient, blur.lumaMax, rc->working_space_gamma);
         float colorJump = std::max({std::fabs(atMax.r - atMin.r), std::fabs(atMax.g - atMin.g), std::fabs(atMax.b - atMin.b)});
         float jumpFraction = (rc->deband_threshold > 0.0f) ? ClampUnit(colorJump / rc->deband_threshold) : 1.0f;
-        float blurWeight = 1.0f - SmoothStep01(jumpFraction);
+        float blurWeight = 1.0f - SmoothStep(jumpFraction);
 
         float lumaForLookup = centerLuma + (blur.blurredLuma - centerLuma) * blurWeight;
         t = lumaForLookup + BayerDitherOffset8(x, y);
     } else {
-        float r = inP->red / static_cast<float>(PF_MAX_CHAN8);
-        float g = inP->green / static_cast<float>(PF_MAX_CHAN8);
-        float b = inP->blue / static_cast<float>(PF_MAX_CHAN8);
-        t = ComputeLuma(r, g, b);
+        t = ComputeLuma(Norm8(inP->red), Norm8(inP->green), Norm8(inP->blue));
     }
     RGBAf out = EvaluateGradientExtrapolated(rc->gradient, t, rc->working_space_gamma);
 
@@ -220,11 +220,7 @@ PF_Err RemapPixel8(void* refcon, A_long x, A_long y, PF_Pixel8* inP, PF_Pixel8* 
 PF_Err RemapPixel16(void* refcon, A_long /*x*/, A_long /*y*/, PF_Pixel16* inP, PF_Pixel16* outP) {
     auto* rc = static_cast<RemapRefcon*>(refcon);
 
-    float r = inP->red / static_cast<float>(PF_MAX_CHAN16);
-    float g = inP->green / static_cast<float>(PF_MAX_CHAN16);
-    float b = inP->blue / static_cast<float>(PF_MAX_CHAN16);
-
-    float t = ComputeLuma(r, g, b);
+    float t = ComputeLuma(Norm16(inP->red), Norm16(inP->green), Norm16(inP->blue));
     RGBAf out = EvaluateGradientExtrapolated(rc->gradient, t, rc->working_space_gamma);
 
     outP->red = static_cast<A_u_short>(ClampUnit(out.r) * PF_MAX_CHAN16 + 0.5f);
@@ -270,35 +266,7 @@ PF_Err BuildGradientFromParams(PF_InData* in_data, GradientData* gradient) {
 
     if (!err) {
         *gradient = GradientRemap_UnflattenArbHandle(in_data, gradient_param.u.arb_d.value);
-
-        switch (interp_mode_param.u.pd.value) {
-            case InterpModePopup_LINEAR_LIGHT:
-                gradient->interpolation_mode = InterpMode::LinearLight;
-                break;
-            case InterpModePopup_OKLCH:
-                gradient->interpolation_mode = InterpMode::OKLCH;
-                break;
-            case InterpModePopup_NATIVE:
-            default:
-                gradient->interpolation_mode = InterpMode::NaiveLerp;
-                break;
-        }
-
-        switch (path_param.u.pd.value) {
-            case InterpPathPopup_LINEAR:
-                gradient->path = InterpPath::Linear;
-                break;
-            case InterpPathPopup_STEP:
-                gradient->path = InterpPath::Step;
-                break;
-            case InterpPathPopup_EASE:
-                gradient->path = InterpPath::Ease;
-                break;
-            case InterpPathPopup_CUBIC:
-            default:
-                gradient->path = InterpPath::Cubic;
-                break;
-        }
+        GradientRemap_ApplyInterpPopups(*gradient, interp_mode_param.u.pd.value, path_param.u.pd.value);
     }
 
     ERR2(PF_CHECKIN_PARAM(in_data, &interp_mode_param));
@@ -355,6 +323,39 @@ PF_Err ActuallyRender(PF_InData* in_data, PF_OutData* out_data, PF_EffectWorld* 
 }
 
 } // namespace
+
+// External linkage (declared in GradientRemap.h): GradientRemap_UI.cpp's BuildGradientForUI
+// needs the identical popup->enum mapping BuildGradientFromParams above uses.
+void GradientRemap_ApplyInterpPopups(GradientData& g, A_long interp_mode_popup_value, A_long path_popup_value) {
+    switch (interp_mode_popup_value) {
+        case InterpModePopup_LINEAR_LIGHT:
+            g.interpolation_mode = InterpMode::LinearLight;
+            break;
+        case InterpModePopup_OKLCH:
+            g.interpolation_mode = InterpMode::OKLCH;
+            break;
+        case InterpModePopup_NATIVE:
+        default:
+            g.interpolation_mode = InterpMode::NaiveLerp;
+            break;
+    }
+
+    switch (path_popup_value) {
+        case InterpPathPopup_LINEAR:
+            g.path = InterpPath::Linear;
+            break;
+        case InterpPathPopup_STEP:
+            g.path = InterpPath::Step;
+            break;
+        case InterpPathPopup_EASE:
+            g.path = InterpPath::Ease;
+            break;
+        case InterpPathPopup_CUBIC:
+        default:
+            g.path = InterpPath::Cubic;
+            break;
+    }
+}
 
 static PF_Err About(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* /*params*/[], PF_LayerDef* /*output*/) {
     PF_SPRINTF(out_data->return_msg, "%s v%d.%d\r%s", NAME, MAJOR_VERSION, MINOR_VERSION, DESCRIPTION);

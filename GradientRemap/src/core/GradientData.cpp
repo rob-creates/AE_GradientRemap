@@ -39,8 +39,7 @@ bool ReadF32LE(const uint8_t* data, size_t size, size_t offset, float& out) {
 } // namespace
 
 GradientData GradientData::Default() {
-    GradientData g;
-    g.interpolation_mode = InterpMode::NaiveLerp;
+    GradientData g; // interpolation_mode already defaults to InterpMode::NaiveLerp (GradientData.h)
     g.knots = {
         {0.0f, 0.0f, 0.0f, 0.0f, 1.0f},
         {1.0f, 1.0f, 1.0f, 1.0f, 1.0f},

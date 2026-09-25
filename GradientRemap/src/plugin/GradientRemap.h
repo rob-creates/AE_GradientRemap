@@ -106,6 +106,13 @@ enum { InterpModePopup_OKLCH = 1, InterpModePopup_NATIVE, InterpModePopup_LINEAR
 // is second, ahead of Linear/Step.
 enum { InterpPathPopup_CUBIC = 1, InterpPathPopup_EASE, InterpPathPopup_LINEAR, InterpPathPopup_STEP };
 
+// Maps the two popup values above onto GradientData's own interpolation_mode/path
+// fields. Shared by GradientRemap_Main.cpp's render-time BuildGradientFromParams and
+// GradientRemap_UI.cpp's UI-time BuildGradientForUI, which both need the identical
+// mapping applied -- defined in GradientRemap_Main.cpp.
+void GradientRemap_ApplyInterpPopups(GradientRemap::GradientData& g, A_long interp_mode_popup_value,
+                                      A_long path_popup_value);
+
 // A sentinel checked in every arbitrary-data callback against the refconPV AE hands
 // back, matching the SDK's own ColorGrid sample -- cheap sanity check, not meaningful
 // data. Any fixed, distinctive bit pattern works; this one is just this project's own.
@@ -154,6 +161,13 @@ PF_Err GradientRemap_HandleArbitrary(PF_InData* in_data, PF_OutData* out_data, P
 GradientRemap::GradientData GradientRemap_UnflattenArbHandle(PF_InData* in_data, PF_Handle arbH);
 PF_Err GradientRemap_ReflattenIntoHandle(PF_InData* in_data, const GradientRemap::GradientData& g, PF_Handle* arbHP);
 PF_Err GradientRemap_CreateDefaultArbHandle(PF_InData* in_data, PF_Handle* arbHP);
+
+// Reflattens `g` into the GRADREMAP_GRADIENT param's live handle and marks it changed --
+// shared by GradientRemap_UI.cpp's click/drag handlers and GradientRemap_SaveLoad.cpp's
+// Load button, both of which need to write a mutated gradient back and have AE pick it
+// up. Defined in GradientRemap_Arb.cpp, alongside GradientRemap_ReflattenIntoHandle.
+PF_Err GradientRemap_WriteGradientAndMarkChanged(PF_InData* in_data, PF_ParamDef* params[],
+                                                  const GradientRemap::GradientData& g);
 
 // GradientRemap_UI.cpp: custom UI event handling (PF_Cmd_EVENT) and the transient
 // selection-state sequence data lifecycle (PF_Cmd_SEQUENCE_*).
