@@ -4,6 +4,7 @@
 //   GradientRemapCoreTests test              -- run assertions, exit 0 on pass
 //   GradientRemapCoreTests dump <output_dir> -- write PPM strips + CSV per mode for visual inspection
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -378,6 +379,73 @@ void TestOffsetLoop() {
     Check(periodic, "offset loop: one full revolution is a full period in every mode");
 }
 
+// GradientLUT (per-frame lookup table used by the plugin) vs. exact EvaluateGradient.
+// Includes deliberately hostile gradients: close knots whose blend swings channels
+// out of gamut and through zero, where the transfer curves bend hardest.
+void TestGradientLUT() {
+    struct Case {
+        const char* name;
+        std::vector<GradientKnot> knots;
+    };
+    const Case cases[] = {
+        {"black-white", {{0.0f, 0, 0, 0, 1}, {1.0f, 1, 1, 1, 1}}},
+        {"5-knot",
+         {{0.00f, 0.02f, 0.01f, 0.10f, 1}, {0.20f, 0.80f, 0.05f, 0.40f, 1}, {0.45f, 0.10f, 0.70f, 0.20f, 1},
+          {0.70f, 0.95f, 0.85f, 0.10f, 1}, {1.00f, 1, 1, 1, 1}}},
+        {"magenta/green/yellow", {{0.0f, 1, 0, 1, 1}, {0.5f, 0, 1, 0, 1}, {1.0f, 1, 1, 0, 1}}},
+        {"close knots 0.01", {{0.0f, 0, 0, 0, 1}, {0.495f, 1, 0, 1, 1}, {0.505f, 0, 1, 0, 1}, {1.0f, 1, 1, 1, 1}}},
+        {"close knots 0.002", {{0.0f, 0, 0, 0, 1}, {0.499f, 1, 0, 0, 1}, {0.501f, 0, 0, 1, 1}, {1.0f, 1, 1, 1, 1}}},
+        {"coincident knots", {{0.0f, 0, 0, 0, 1}, {0.5f, 1, 0, 0, 1}, {0.5f, 0, 0, 1, 1}, {1.0f, 1, 1, 1, 1}}},
+    };
+    const InterpMode modes[] = {InterpMode::NaiveLerp, InterpMode::LinearLight, InterpMode::OKLCH};
+    const InterpPath paths[] = {InterpPath::Cubic, InterpPath::Ease, InterpPath::Linear, InterpPath::Step};
+    constexpr float kTolerance = 2.0f / 65535.0f; // two 16-bit code values (~1/130 of an 8-bit step)
+    constexpr int kSamples = 200000;
+
+    for (const Case& c : cases) {
+        float worst = 0.0f;
+        bool endpointsExact = true;
+        for (InterpMode m : modes) {
+            for (InterpPath p : paths) {
+                GradientData g;
+                g.knots = c.knots;
+                g.interpolation_mode = m;
+                g.path = p;
+                GradientLUT lut;
+                lut.Build(g, 0.0f);
+                for (int i = 0; i <= kSamples; ++i) {
+                    float t = static_cast<float>(i) / kSamples;
+                    RGBAf a = EvaluateGradient(g, t);
+                    RGBAf b = lut.Sample(t);
+                    worst = std::max({worst, std::fabs(a.r - b.r), std::fabs(a.g - b.g), std::fabs(a.b - b.b)});
+                }
+                for (float t : {0.0f, 1.0f}) {
+                    RGBAf a = EvaluateGradient(g, t);
+                    RGBAf b = lut.Sample(t);
+                    endpointsExact = endpointsExact && a.r == b.r && a.g == b.g && a.b == b.b && a.a == b.a;
+                }
+            }
+        }
+        std::cout << "info: LUT worst error for " << c.name << " = " << worst * 65535.0f << " 16-bit steps\n";
+        Check(worst <= kTolerance, std::string("LUT: within two 16-bit steps of exact for ") + c.name);
+        Check(endpointsExact, std::string("LUT: t=0 and t=1 are bit-exact for ") + c.name);
+    }
+
+    // Hard edges stay hard and in the right place: Step switches exactly at the knot.
+    GradientData step;
+    step.path = InterpPath::Step;
+    step.knots = {{0.0f, 0, 0, 0, 1}, {0.5f, 1, 0, 0, 1}, {1.0f, 1, 1, 1, 1}};
+    GradientLUT stepLut;
+    stepLut.Build(step, 0.0f);
+    RGBAf below = stepLut.Sample(0.5f - 1e-6f);
+    RGBAf above = stepLut.Sample(0.5f + 1e-6f);
+    Check(below.r == 0.0f && above.r == 1.0f, "LUT: Step edge stays hard at the knot position (no in-between colour)");
+
+    // NaN luma (e.g. from NaN source pixels at 32bpc) must not index out of range.
+    RGBAf nanSample = stepLut.Sample(std::nanf(""));
+    Check(nanSample.r == 0.0f, "LUT: NaN input safely returns the t=0 colour");
+}
+
 void RunTests() {
     TestFlattenRoundTrip();
     TestWysiwygEndpoints();
@@ -390,6 +458,7 @@ void RunTests() {
     TestPathCubicOKLCHNoHueOvershoot();
     TestCSVRoundTrip();
     TestOffsetLoop();
+    TestGradientLUT();
 
     std::cout << "\n" << (g_failures == 0 ? "ALL TESTS PASSED" : std::to_string(g_failures) + " TEST(S) FAILED") << "\n";
 }
@@ -523,12 +592,19 @@ int RunBench() {
     const InterpMode modes[] = {InterpMode::NaiveLerp, InterpMode::LinearLight, InterpMode::OKLCH};
     const InterpPath paths[] = {InterpPath::Cubic, InterpPath::Ease, InterpPath::Linear, InterpPath::Step};
     const char* pathNames[] = {"Cubic", "Ease", "Linear", "Step"};
-    std::printf("%-12s %-7s %12s\n", "mode", "path", "direct Mev/s");
+    std::printf("%-12s %-7s %12s %12s %10s %8s\n", "mode", "path", "direct Mev/s", "LUT Mev/s", "build ms", "exact %");
     for (InterpMode m : modes) {
         for (int p = 0; p < 4; ++p) {
             GradientData g = BenchGradient(m, paths[p]);
             double direct = BenchMevalsPerSec([&](float t) { return EvaluateGradient(g, t); });
-            std::printf("%-12s %-7s %12.1f\n", ModeName(m), pathNames[p], direct);
+            GradientLUT lut;
+            auto buildStart = std::chrono::steady_clock::now();
+            lut.Build(g, 0.0f);
+            double buildMs =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - buildStart).count();
+            double viaLut = BenchMevalsPerSec([&](float t) { return lut.Sample(t); });
+            std::printf("%-12s %-7s %12.1f %12.1f %10.2f %8.2f\n", ModeName(m), pathNames[p], direct, viaLut, buildMs,
+                        100.0f * lut.ExactCellFraction());
         }
     }
     return 0;

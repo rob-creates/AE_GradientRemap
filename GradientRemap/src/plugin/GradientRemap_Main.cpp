@@ -16,14 +16,12 @@
 
 #include <algorithm>
 #include <cmath>
-#include <optional>
 
 #include "../core/GradientData.h"
 #include "../core/Interpolation.h"
 
 using GradientRemap::ClampUnit;
 using GradientRemap::GradientData;
-using GradientRemap::GradientKnot;
 using GradientRemap::InterpMode;
 using GradientRemap::InterpPath;
 using GradientRemap::LoopMode;
@@ -37,68 +35,24 @@ namespace {
 // requiring the user to understand or choose a luma model.
 float ComputeLuma(float r, float g, float b) { return 0.2126f * r + 0.7152f * g + 0.0722f * b; }
 
-// Minimum knot-pair span (in position units) below which we refuse to use that pair to
-// derive an extrapolation slope (see EvaluateGradientExtrapolated) -- any nonzero colour
-// difference divided by a near-zero span blows up toward +/-infinity, which is a
-// mathematical inevitability of two-point extrapolation, not a fixable rounding error.
-constexpr float kMinExtrapolationSpan = 1.0f / 1024.0f;
-
-// In-range blending (t within [0,1], the overwhelming common case -- and the ONLY case
-// reachable for 8bpc/16bpc, since Rec.709 luma of any valid normalized pixel is
-// inherently in [0,1]) goes straight to GradientRemapCore's EvaluateGradient, which
-// already holds the nearest end knot's colour flat when t falls outside the user's
-// placed knot range -- exactly matching Photoshop/Cinema 4D: a knot doesn't need to sit
-// at position 0 or 1 for gradient editing to feel normal.
-//
-// True extrapolation -- linearly extending past the boundary knot pair's own colours --
-// is reserved for t genuinely outside [0,1]: only reachable via unclamped 32bpc float
-// HDR/negative source values, per the original brief's clamp-toggle intent. Bug fixed
-// 2026-09-25: this used to extrapolate any time t was merely outside the *knot* range,
-// even when knots didn't span [0,1] and t was itself perfectly in-range -- so dragging
-// two knots close together in the Phase 3 UI (shrinking the boundary pair's span toward
-// zero) visibly distorted the "held" colour past the last knot, since that region was
-// being extrapolated using an increasingly unstable near-zero-span slope instead of
-// simply holding the last knot's colour flat.
-// Point-slope colour extrapolation using the line through two knots, evaluated at `t`
-// (which may be outside [a.position, b.position]). Returns std::nullopt if the pair's
-// span is too small to safely derive a slope from (see kMinExtrapolationSpan) -- the
-// caller falls back to holding the nearest knot's colour flat.
-std::optional<RGBAf> ExtrapolateFromPair(const GradientKnot& a, const GradientKnot& b, float t) {
-    float span = b.position - a.position;
-    if (span <= kMinExtrapolationSpan) return std::nullopt;
-    float slope = (t - a.position) / span;
-    return RGBAf{a.r + (b.r - a.r) * slope, a.g + (b.g - a.g) * slope, a.b + (b.b - a.b) * slope,
-                 a.a + (b.a - a.a) * slope};
-}
-
-RGBAf EvaluateGradientExtrapolated(const GradientData& g, float t, float working_space_gamma) {
-    const auto& knots = g.knots;
-    if (t < 0.0f && knots.size() >= 2) {
-        if (auto c = ExtrapolateFromPair(knots[0], knots[1], t)) return *c;
-    }
-    if (t > 1.0f && knots.size() >= 2) {
-        if (auto c = ExtrapolateFromPair(knots[knots.size() - 2], knots.back(), t)) return *c;
-    }
-    return GradientRemap::EvaluateGradient(g, t, working_space_gamma);
-}
-
 struct RemapRefcon {
-    GradientData gradient;
+    // Built once per frame in SmartRender: all colour-space/curve maths happens there, so
+    // the per-pixel work is just luma + loop + a table read (see GradientLUT).
+    GradientRemap::GradientLUT lut;
     float offset_revolutions; // "Offset" dial, degrees / 360
     LoopMode loop_mode;
     PF_Boolean clamp_input;
     PF_Boolean dither;
-    float working_space_gamma; // 0.0f = precise sRGB curve (see GradientRemap_ColorSpace.h)
     const PF_EffectWorld* input_world; // only used by the 8bpc anti-banding blur (RemapPixel8)
 };
 
-// Applies the Offset/Loop remap to a source luma, then looks up the gradient. Note every
-// Loop mode folds its result into [0,1], so unclamped 32bpc HDR/negative luma now wraps
-// (or bounces) back into the gradient instead of reaching EvaluateGradientExtrapolated's
-// >1/<0 extrapolation branch.
+// Applies the Offset/Loop remap to a source luma, then looks up the gradient. Every Loop
+// mode folds its result into [0,1], so unclamped 32bpc HDR/negative luma wraps (or
+// bounces) back into the gradient -- which is also what lets a [0,1] table cover every
+// reachable t. (Pre-2026-09-28 the >1/<0 case extrapolated past the end knots instead;
+// that path became unreachable with Offset/Loop and was removed.)
 RGBAf LookupLooped(const RemapRefcon* rc, float luma) {
-    float t = GradientRemap::ApplyOffsetLoop(luma, rc->offset_revolutions, rc->loop_mode);
-    return EvaluateGradientExtrapolated(rc->gradient, t, rc->working_space_gamma);
+    return rc->lut.Sample(GradientRemap::ApplyOffsetLoop(luma, rc->offset_revolutions, rc->loop_mode));
 }
 
 // Normalize an integer channel value to [0,1] -- shared by SampleLumaAlpha8Clamped and
@@ -258,8 +212,8 @@ PF_Err RemapPixelFloat(void* refcon, A_long /*x*/, A_long /*y*/, PF_PixelFloat* 
     }
     RGBAf out = LookupLooped(rc, t);
 
-    // 32bpc float is not range-limited: HDR/negative values from extrapolation are
-    // preserved as-is (no clamp), matching the original brief's clamp-toggle intent.
+    // 32bpc float is not range-limited: out-of-gamut blend results (e.g. an OKLCH path
+    // leaving the working-space gamut) are preserved as-is rather than clipped.
     outP->red = out.r;
     outP->green = out.g;
     outP->blue = out.b;
@@ -523,6 +477,7 @@ static PF_Err SmartRender(PF_InData* in_data, PF_OutData* out_data, PF_SmartRend
                            &dither_param));
 
     RemapRefcon refcon;
+    GradientData gradient;
     if (!err) {
         // Divide in double: a many-revolution angle in float would lose sub-degree precision.
         refcon.offset_revolutions = static_cast<float>(FIX_2_FLOAT(offset_param.u.ad.value) / 360.0);
@@ -540,12 +495,12 @@ static PF_Err SmartRender(PF_InData* in_data, PF_OutData* out_data, PF_SmartRend
         }
         refcon.clamp_input = clamp_param.u.bd.value;
         refcon.dither = dither_param.u.bd.value;
-        refcon.working_space_gamma = GradientRemap_QueryWorkingSpaceGamma(in_data);
         refcon.input_world = input_worldP;
-        ERR(BuildGradientFromParams(in_data, &refcon.gradient));
+        ERR(BuildGradientFromParams(in_data, &gradient));
     }
 
-    if (!err && refcon.gradient.IsValid()) {
+    if (!err && gradient.IsValid()) {
+        refcon.lut.Build(gradient, GradientRemap_QueryWorkingSpaceGamma(in_data));
         ERR(ActuallyRender(in_data, out_data, input_worldP, output_worldP, &refcon));
     } else if (!err) {
         // Defensive fallback: if the gradient ever fails validation, pass the input

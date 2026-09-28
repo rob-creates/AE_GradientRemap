@@ -366,8 +366,9 @@ RGBAf EvaluateGradient(const GradientData& g, float t, float working_space_gamma
         return RGBAf{k.r, k.g, k.b, k.a};
     }
 
-    // Linear scan is fine up to kMaxKnots (256); replace with binary search only if
-    // profiling shows this loop matters (it's precomputed once per render, not per pixel).
+    // Linear scan is fine up to kMaxKnots (256): the plugin calls this through
+    // GradientLUT, i.e. ~kDefaultSize times per frame plus knot-containing cells, not
+    // once per pixel.
     size_t i = 0;
     while (i + 1 < knots.size() && knots[i + 1].position < t) {
         ++i;
@@ -410,6 +411,62 @@ RGBAf EvaluateGradient(const GradientData& g, float t, float working_space_gamma
             return BlendOKLCH(a, b, shapedT, working_space_gamma);
     }
     return BlendNaive(a, b, shapedT);
+}
+
+void GradientLUT::Build(const GradientData& g, float working_space_gamma, int size) {
+    gradient_ = g;
+    working_space_gamma_ = working_space_gamma;
+    size = std::max(size, 2);
+    entries_.resize(static_cast<size_t>(size));
+    const float last = static_cast<float>(size - 1);
+    for (int i = 0; i < size; ++i) {
+        entries_[static_cast<size_t>(i)] = EvaluateGradient(g, static_cast<float>(i) / last, working_space_gamma);
+    }
+
+    exact_cell_.assign(static_cast<size_t>(size - 1), 0);
+    for (const GradientKnot& k : g.knots) {
+        float x = ClampUnit(k.position) * last;
+        int cell = std::min(static_cast<int>(x), size - 2);
+        exact_cell_[static_cast<size_t>(cell)] = 1;
+        // A knot exactly on a cell boundary also bounds the cell to its left.
+        if (cell > 0 && static_cast<float>(cell) == x) exact_cell_[static_cast<size_t>(cell - 1)] = 1;
+    }
+
+    // Steep, sharply-curving stretches (e.g. two close knots whose blend swings a channel
+    // through zero, where the sRGB/OKLab transfer curves bend hardest) can't be tracked by
+    // straight lines between entries at any practical size. Check each cell's midpoint
+    // against the exact value and hand cells that miss by more than kMaxLerpError to exact
+    // evaluation instead. Ordinary gradients flag few or no cells, so this costs one extra
+    // build pass, not per-pixel work.
+    for (int i = 0; i < size - 1; ++i) {
+        if (exact_cell_[static_cast<size_t>(i)]) continue;
+        const RGBAf& a = entries_[static_cast<size_t>(i)];
+        const RGBAf& b = entries_[static_cast<size_t>(i) + 1];
+        RGBAf mid = EvaluateGradient(g, (static_cast<float>(i) + 0.5f) / last, working_space_gamma);
+        float err = std::max({std::fabs(mid.r - 0.5f * (a.r + b.r)), std::fabs(mid.g - 0.5f * (a.g + b.g)),
+                              std::fabs(mid.b - 0.5f * (a.b + b.b)), std::fabs(mid.a - 0.5f * (a.a + b.a))});
+        if (err > kMaxLerpError) exact_cell_[static_cast<size_t>(i)] = 1;
+    }
+}
+
+float GradientLUT::ExactCellFraction() const {
+    if (exact_cell_.empty()) return 0.0f;
+    size_t exact = static_cast<size_t>(std::count(exact_cell_.begin(), exact_cell_.end(), uint8_t{1}));
+    return static_cast<float>(exact) / static_cast<float>(exact_cell_.size());
+}
+
+RGBAf GradientLUT::Sample(float t) const {
+    // ClampUnit also maps NaN to 0 (std::max(0, NaN) == 0), keeping the index in range.
+    t = ClampUnit(t);
+    const int lastIndex = static_cast<int>(entries_.size()) - 1;
+    float x = t * static_cast<float>(lastIndex);
+    int i = static_cast<int>(x);
+    if (i >= lastIndex) return entries_.back();
+    if (exact_cell_[static_cast<size_t>(i)]) return EvaluateGradient(gradient_, t, working_space_gamma_);
+    float f = x - static_cast<float>(i);
+    const RGBAf& a = entries_[static_cast<size_t>(i)];
+    const RGBAf& b = entries_[static_cast<size_t>(i) + 1];
+    return RGBAf{Lerp(a.r, b.r, f), Lerp(a.g, b.g, f), Lerp(a.b, b.b, f), Lerp(a.a, b.a, f)};
 }
 
 } // namespace GradientRemap

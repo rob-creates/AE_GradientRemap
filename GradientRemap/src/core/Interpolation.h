@@ -2,6 +2,9 @@
 
 #include "GradientData.h"
 
+#include <cstdint>
+#include <vector>
+
 namespace GradientRemap {
 
 struct RGBAf {
@@ -60,11 +63,41 @@ OKLCH OKLabToOKLCH(const OKLab& lab);
 OKLab OKLCHToOKLab(const OKLCH& lch);
 
 // Evaluate the gradient at parametric position t. t outside [knots.front().position,
-// knots.back().position] is clamped to the nearest end knot's colour (no extrapolation
-// at the core level -- that policy belongs to the AE integration layer in Phase 2).
+// knots.back().position] is clamped to the nearest end knot's colour (no extrapolation).
 // `g` must satisfy g.IsValid(). `working_space_gamma` is forwarded to
 // WorkingSpaceTransform for the LinearLight/OKLCH modes (ignored by NaiveLerp, which
 // never converts); see WorkingSpaceTransform's doc comment above.
 RGBAf EvaluateGradient(const GradientData& g, float t, float working_space_gamma = 0.0f);
+
+// Per-frame lookup table over t in [0,1], built once from EvaluateGradient so the
+// expensive colour-space maths (pow/cbrt/atan2/sin/cos, cubic tangents) runs `size`
+// times per frame instead of once per pixel. Sample() linearly interpolates between
+// entries, so t is never quantised and no banding is introduced.
+//
+// Exactness guarantees:
+//  - t=0 and t=1 return exactly EvaluateGradient(0)/(1) (end entries are evaluated there).
+//  - Any cell containing a knot falls back to exact EvaluateGradient. Knots are where
+//    the curve can jump (Step, coincident knots) or kink (Linear), which linear sampling
+//    between entries would smear or round off.
+//  - Any other cell whose midpoint lerp misses by more than kMaxLerpError is also
+//    evaluated exactly (see Build). See the LUT accuracy test in tests/main.cpp.
+class GradientLUT {
+public:
+    static constexpr int kDefaultSize = 4096;
+    // Cells whose midpoint lerp misses the exact value by more than this are evaluated
+    // exactly instead (half a 16-bit code value).
+    static constexpr float kMaxLerpError = 0.5f / 65535.0f;
+
+    void Build(const GradientData& g, float working_space_gamma, int size = kDefaultSize);
+    RGBAf Sample(float t) const;
+    // Fraction of cells that fall back to exact evaluation (diagnostics/benchmarking).
+    float ExactCellFraction() const;
+
+private:
+    GradientData gradient_;
+    float working_space_gamma_ = 0.0f;
+    std::vector<RGBAf> entries_;
+    std::vector<uint8_t> exact_cell_; // 1 = cell [i, i+1] contains a knot
+};
 
 } // namespace GradientRemap
