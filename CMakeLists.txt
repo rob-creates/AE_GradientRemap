@@ -9,6 +9,14 @@ if(APPLE)
     enable_language(OBJCXX)
 endif()
 
+# Default to an optimised build. With no build type, single-config generators (Unix
+# Makefiles) pass no -O flag at all, i.e. -O0 -- the plugin was shipping unoptimised
+# until 2026-09-28. Deliberately no -ffast-math: it relaxes pow/NaN/denormal handling
+# and could shift output colours, which conflicts with the WYSIWYG goal.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 

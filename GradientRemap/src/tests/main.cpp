@@ -4,6 +4,7 @@
 //   GradientRemapCoreTests test              -- run assertions, exit 0 on pass
 //   GradientRemapCoreTests dump <output_dir> -- write PPM strips + CSV per mode for visual inspection
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -486,7 +487,57 @@ int DumpStrips(const std::string& outDir) {
 
 } // namespace
 
+// Throughput benchmark: `GradientRemapCoreTests bench`. Sweeps t across [0,1] (a
+// deterministic stand-in for a frame's worth of luma values) and reports millions of
+// gradient evaluations per second for every colour space x interpolation path.
+constexpr int kBenchSamples = 4'000'000;
+
+GradientData BenchGradient(InterpMode mode, InterpPath path) {
+    GradientData g;
+    g.interpolation_mode = mode;
+    g.path = path;
+    g.knots = {
+        {0.00f, 0.02f, 0.01f, 0.10f, 1.0f}, {0.20f, 0.80f, 0.05f, 0.40f, 1.0f}, {0.45f, 0.10f, 0.70f, 0.20f, 1.0f},
+        {0.70f, 0.95f, 0.85f, 0.10f, 1.0f}, {1.00f, 1.00f, 1.00f, 1.00f, 1.0f},
+    };
+    return g;
+}
+
+template <typename Fn>
+double BenchMevalsPerSec(Fn&& eval) {
+    volatile float sink = 0.0f;
+    float acc = 0.0f;
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < kBenchSamples; ++i) {
+        RGBAf c = eval(static_cast<float>(i) / static_cast<float>(kBenchSamples - 1));
+        acc += c.r + c.g + c.b;
+    }
+    auto end = std::chrono::steady_clock::now();
+    sink = acc;
+    (void)sink;
+    double seconds = std::chrono::duration<double>(end - start).count();
+    return kBenchSamples / seconds / 1e6;
+}
+
+int RunBench() {
+    const InterpMode modes[] = {InterpMode::NaiveLerp, InterpMode::LinearLight, InterpMode::OKLCH};
+    const InterpPath paths[] = {InterpPath::Cubic, InterpPath::Ease, InterpPath::Linear, InterpPath::Step};
+    const char* pathNames[] = {"Cubic", "Ease", "Linear", "Step"};
+    std::printf("%-12s %-7s %12s\n", "mode", "path", "direct Mev/s");
+    for (InterpMode m : modes) {
+        for (int p = 0; p < 4; ++p) {
+            GradientData g = BenchGradient(m, paths[p]);
+            double direct = BenchMevalsPerSec([&](float t) { return EvaluateGradient(g, t); });
+            std::printf("%-12s %-7s %12.1f\n", ModeName(m), pathNames[p], direct);
+        }
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::strcmp(argv[1], "bench") == 0) {
+        return RunBench();
+    }
     if (argc >= 2 && std::strcmp(argv[1], "dump") == 0) {
         std::string outDir = argc >= 3 ? argv[2] : "test_output";
         return DumpStrips(outDir);
