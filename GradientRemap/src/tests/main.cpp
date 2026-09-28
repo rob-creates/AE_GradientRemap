@@ -346,6 +346,37 @@ void TestCSVRoundTrip() {
           "CSV: rejects a single-knot file (below GradientData::kMinKnots)");
 }
 
+void TestOffsetLoop() {
+    const LoopMode modes[] = {LoopMode::Cycle, LoopMode::Bounce};
+    for (LoopMode m : modes) {
+        bool identity = true;
+        for (int i = 0; i <= 20; ++i) {
+            float t = i / 20.0f;
+            identity = identity && Near(ApplyOffsetLoop(t, 0.0f, m), t);
+        }
+        Check(identity, std::string("offset loop: zero offset is an exact identity on [0,1] (") +
+                            (m == LoopMode::Cycle ? "Cycle" : "Bounce") + ")");
+    }
+    Check(Near(ApplyOffsetLoop(0.0f, 0.0f, LoopMode::Sine), 0.0f) && Near(ApplyOffsetLoop(1.0f, 0.0f, LoopMode::Sine), 1.0f),
+          "offset loop: Sine maps 0->0 and 1->1 at zero offset");
+
+    Check(Near(ApplyOffsetLoop(0.9f, 0.25f, LoopMode::Cycle), 0.15f), "offset loop: Cycle wraps past 1");
+    Check(Near(ApplyOffsetLoop(0.1f, -0.25f, LoopMode::Cycle), 0.85f), "offset loop: Cycle wraps below 0");
+    Check(Near(ApplyOffsetLoop(0.9f, 0.1f, LoopMode::Bounce), 0.9f), "offset loop: Bounce reflects off 1 (0.9 + 0.2 -> 0.9)");
+    Check(Near(ApplyOffsetLoop(0.0f, 0.5f, LoopMode::Bounce), 1.0f), "offset loop: Bounce half revolution reverses the ramp");
+
+    // One full revolution returns every mode to where it started (seamless animation loop).
+    const LoopMode all[] = {LoopMode::Cycle, LoopMode::Sine, LoopMode::Bounce};
+    bool periodic = true;
+    for (LoopMode m : all) {
+        for (int i = 0; i <= 20; ++i) {
+            float t = i / 20.0f;
+            periodic = periodic && Near(ApplyOffsetLoop(t, 1.0f, m), ApplyOffsetLoop(t, 0.0f, m), 1e-4f);
+        }
+    }
+    Check(periodic, "offset loop: one full revolution is a full period in every mode");
+}
+
 void RunTests() {
     TestFlattenRoundTrip();
     TestWysiwygEndpoints();
@@ -357,6 +388,7 @@ void RunTests() {
     TestPathCubicReducesRidgeAtInteriorKnot();
     TestPathCubicOKLCHNoHueOvershoot();
     TestCSVRoundTrip();
+    TestOffsetLoop();
 
     std::cout << "\n" << (g_failures == 0 ? "ALL TESTS PASSED" : std::to_string(g_failures) + " TEST(S) FAILED") << "\n";
 }

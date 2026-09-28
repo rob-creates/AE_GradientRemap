@@ -52,17 +52,24 @@
 // Order here MUST match the PF_ADD_* call order in ParamsSetup (GradientRemap_Main.cpp)
 // -- params[] is positional, assigned strictly by registration order, not by these
 // names. GRADREMAP_GRADIENT listed right after GRADREMAP_INPUT (2026-09-25, user
-// request) so the gradient bar is the first visible parameter.
+// request) so the gradient bar is the first visible parameter. Grouped into "Colour" and
+// "Motion" twirl-down topics (2026-09-28, user request) -- each topic's start/end marker
+// is itself a param and occupies a slot here.
 enum {
     GRADREMAP_INPUT = 0,
+    GRADREMAP_COLOUR_TOPIC_START,
     GRADREMAP_GRADIENT,
     GRADREMAP_INTERP_MODE,
     GRADREMAP_PATH,
-    GRADREMAP_CLAMP_INPUT,
     GRADREMAP_DITHER,
-    GRADREMAP_DEBAND_THRESHOLD,
+    GRADREMAP_CLAMP_INPUT,
     GRADREMAP_SAVE_BUTTON,
     GRADREMAP_LOAD_BUTTON,
+    GRADREMAP_COLOUR_TOPIC_END,
+    GRADREMAP_MOTION_TOPIC_START,
+    GRADREMAP_OFFSET,
+    GRADREMAP_LOOP,
+    GRADREMAP_MOTION_TOPIC_END,
     GRADREMAP_NUM_PARAMS
 };
 
@@ -72,9 +79,15 @@ enum {
     GRADIENT_DISK_ID,
     CLAMP_INPUT_DISK_ID,
     DITHER_DISK_ID,
-    DEBAND_THRESHOLD_DISK_ID,
+    DEBAND_THRESHOLD_DISK_ID, // retired (2026-09-28): threshold now hardcoded, see kDebandThreshold
     SAVE_BUTTON_DISK_ID,
-    LOAD_BUTTON_DISK_ID
+    LOAD_BUTTON_DISK_ID,
+    OFFSET_DISK_ID,
+    LOOP_DISK_ID,
+    COLOUR_TOPIC_START_DISK_ID,
+    COLOUR_TOPIC_END_DISK_ID,
+    MOTION_TOPIC_START_DISK_ID,
+    MOTION_TOPIC_END_DISK_ID
 };
 
 // NOTE (2026-09-25): AE displays this popup as "Colour Space", not "Interpolation" --
@@ -105,6 +118,12 @@ enum { InterpModePopup_OKLCH = 1, InterpModePopup_NATIVE, InterpModePopup_LINEAR
 // 2026-09-25 -- it isn't smoother than Cubic overall and shouldn't read as if it were)
 // is second, ahead of Linear/Step.
 enum { InterpPathPopup_CUBIC = 1, InterpPathPopup_EASE, InterpPathPopup_LINEAR, InterpPathPopup_STEP };
+
+// "Loop" popup (paired with the "Offset" angle dial -- see ApplyOffsetLoop in
+// ../core/Interpolation.h). Cycle first/default: at zero offset it's an exact identity.
+// Displayed as "Wave" (2026-09-28, user feedback -- AE's own convention); core keeps
+// LoopMode::Sine, which still accurately describes the maths.
+enum { LoopPopup_CYCLE = 1, LoopPopup_WAVE, LoopPopup_BOUNCE };
 
 // Maps the two popup values above onto GradientData's own interpolation_mode/path
 // fields. Shared by GradientRemap_Main.cpp's render-time BuildGradientFromParams and

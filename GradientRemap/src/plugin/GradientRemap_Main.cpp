@@ -26,6 +26,7 @@ using GradientRemap::GradientData;
 using GradientRemap::GradientKnot;
 using GradientRemap::InterpMode;
 using GradientRemap::InterpPath;
+using GradientRemap::LoopMode;
 using GradientRemap::RGBAf;
 using GradientRemap::SmoothStep;
 
@@ -83,12 +84,22 @@ RGBAf EvaluateGradientExtrapolated(const GradientData& g, float t, float working
 
 struct RemapRefcon {
     GradientData gradient;
+    float offset_revolutions; // "Offset" dial, degrees / 360
+    LoopMode loop_mode;
     PF_Boolean clamp_input;
     PF_Boolean dither;
-    float deband_threshold; // see RemapPixel8's threshold-gated blur
     float working_space_gamma; // 0.0f = precise sRGB curve (see GradientRemap_ColorSpace.h)
     const PF_EffectWorld* input_world; // only used by the 8bpc anti-banding blur (RemapPixel8)
 };
+
+// Applies the Offset/Loop remap to a source luma, then looks up the gradient. Note every
+// Loop mode folds its result into [0,1], so unclamped 32bpc HDR/negative luma now wraps
+// (or bounces) back into the gradient instead of reaching EvaluateGradientExtrapolated's
+// >1/<0 extrapolation branch.
+RGBAf LookupLooped(const RemapRefcon* rc, float luma) {
+    float t = GradientRemap::ApplyOffsetLoop(luma, rc->offset_revolutions, rc->loop_mode);
+    return EvaluateGradientExtrapolated(rc->gradient, t, rc->working_space_gamma);
+}
 
 // Normalize an integer channel value to [0,1] -- shared by SampleLumaAlpha8Clamped and
 // RemapPixel8/16 rather than each repeating `v / static_cast<float>(PF_MAX_CHANx)`.
@@ -127,6 +138,13 @@ float BayerDitherOffset8(A_long x, A_long y) {
 // inherent tradeoff of any spatial anti-banding filter, which is why it's opt-in via
 // the same checkbox rather than always-on.
 constexpr A_long kBandingBlurRadius = 2; // 5x5 = 25 taps
+
+// Gates the anti-banding blur by how large a colour jump it would smooth over (see
+// RemapPixel8): below this, blend fully; at/above it, don't blend at all (with a smooth
+// ramp in between) so a genuine hard transition -- Step, or two knots placed close
+// together with contrasting colours -- doesn't get softened. Was a user-facing
+// "Debanding Threshold" slider; hardcoded at its old default (2026-09-28, user request).
+constexpr float kDebandThreshold = 0.5f;
 
 struct LumaAlphaSample {
     float luma;
@@ -196,10 +214,10 @@ PF_Err RemapPixel8(void* refcon, A_long x, A_long y, PF_Pixel8* inP, PF_Pixel8* 
         // placed close together) rather than smoothing sub-LSB source quantization noise.
         // Ramp the blur weight down to 0 as that jump approaches the threshold, rather
         // than a hard on/off cut, so debanding doesn't leave a visible seam of its own.
-        RGBAf atMin = EvaluateGradientExtrapolated(rc->gradient, blur.lumaMin, rc->working_space_gamma);
-        RGBAf atMax = EvaluateGradientExtrapolated(rc->gradient, blur.lumaMax, rc->working_space_gamma);
+        RGBAf atMin = LookupLooped(rc, blur.lumaMin);
+        RGBAf atMax = LookupLooped(rc, blur.lumaMax);
         float colorJump = std::max({std::fabs(atMax.r - atMin.r), std::fabs(atMax.g - atMin.g), std::fabs(atMax.b - atMin.b)});
-        float jumpFraction = (rc->deband_threshold > 0.0f) ? ClampUnit(colorJump / rc->deband_threshold) : 1.0f;
+        float jumpFraction = ClampUnit(colorJump / kDebandThreshold);
         float blurWeight = 1.0f - SmoothStep(jumpFraction);
 
         float lumaForLookup = centerLuma + (blur.blurredLuma - centerLuma) * blurWeight;
@@ -207,7 +225,7 @@ PF_Err RemapPixel8(void* refcon, A_long x, A_long y, PF_Pixel8* inP, PF_Pixel8* 
     } else {
         t = ComputeLuma(Norm8(inP->red), Norm8(inP->green), Norm8(inP->blue));
     }
-    RGBAf out = EvaluateGradientExtrapolated(rc->gradient, t, rc->working_space_gamma);
+    RGBAf out = LookupLooped(rc, t);
 
     outP->red = static_cast<A_u_char>(ClampUnit(out.r) * PF_MAX_CHAN8 + 0.5f);
     outP->green = static_cast<A_u_char>(ClampUnit(out.g) * PF_MAX_CHAN8 + 0.5f);
@@ -221,7 +239,7 @@ PF_Err RemapPixel16(void* refcon, A_long /*x*/, A_long /*y*/, PF_Pixel16* inP, P
     auto* rc = static_cast<RemapRefcon*>(refcon);
 
     float t = ComputeLuma(Norm16(inP->red), Norm16(inP->green), Norm16(inP->blue));
-    RGBAf out = EvaluateGradientExtrapolated(rc->gradient, t, rc->working_space_gamma);
+    RGBAf out = LookupLooped(rc, t);
 
     outP->red = static_cast<A_u_short>(ClampUnit(out.r) * PF_MAX_CHAN16 + 0.5f);
     outP->green = static_cast<A_u_short>(ClampUnit(out.g) * PF_MAX_CHAN16 + 0.5f);
@@ -238,7 +256,7 @@ PF_Err RemapPixelFloat(void* refcon, A_long /*x*/, A_long /*y*/, PF_PixelFloat* 
     if (rc->clamp_input) {
         t = ClampUnit(t);
     }
-    RGBAf out = EvaluateGradientExtrapolated(rc->gradient, t, rc->working_space_gamma);
+    RGBAf out = LookupLooped(rc, t);
 
     // 32bpc float is not range-limited: HDR/negative values from extrapolation are
     // preserved as-is (no clamp), matching the original brief's clamp-toggle intent.
@@ -376,6 +394,11 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
     PF_Err err = PF_Err_NONE;
     PF_ParamDef def;
 
+    // Twirl-down groups (2026-09-28, user request). Each start/end marker is a param in
+    // its own right -- see the GRADREMAP_* enum in GradientRemap.h.
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_TOPIC("Colour", COLOUR_TOPIC_START_DISK_ID);
+
     // Phase 3 custom gradient-bar UI (see docs/DESIGN.md): the knot list lives entirely
     // in this one arbitrary-data param, drawn/edited by GradientRemap_UI.cpp. Its default
     // handle is the same 2-knot black->white GradientData::Default() every other code
@@ -403,17 +426,10 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
     PF_ADD_POPUP("Interpolation", 4, InterpPathPopup_CUBIC, "Cubic|Ease|Linear|Step", PATH_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
-    PF_ADD_CHECKBOXX("Clamp Range (32bpc)", FALSE, 0, CLAMP_INPUT_DISK_ID);
-
-    AEFX_CLR_STRUCT(def);
     PF_ADD_CHECKBOXX("Reduce Banding (8bpc)", FALSE, 0, DITHER_DISK_ID);
 
-    // Gates the anti-banding blur by how large a colour jump it would smooth over (see
-    // BlurredLuma8/RemapPixel8): below this, blend fully; at/above it, don't blend at
-    // all (with a smooth ramp in between) so a genuine hard transition -- Step, or two
-    // knots placed close together with contrasting colours -- doesn't get softened.
     AEFX_CLR_STRUCT(def);
-    PF_ADD_FLOAT_SLIDERX("Debanding Threshold", 0.0, 1.0, 0.0, 1.0, 0.5f, 2, 0, 0, DEBAND_THRESHOLD_DISK_ID);
+    PF_ADD_CHECKBOXX("Clamp Range (32bpc)", FALSE, 0, CLAMP_INPUT_DISK_ID);
 
     // Export/import the knot list as a plain CSV file (see ../core/GradientCSV.h and
     // GradientRemap_SaveLoad.cpp). PF_ParamFlag_SUPERVISE is what routes a click to
@@ -423,6 +439,24 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
 
     AEFX_CLR_STRUCT(def);
     PF_ADD_BUTTON("Load Gradient...", "Load Gradient...", 0, PF_ParamFlag_SUPERVISE, LOAD_BUTTON_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+    PF_END_TOPIC(COLOUR_TOPIC_END_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_TOPIC("Motion", MOTION_TOPIC_START_DISK_ID);
+
+    // Colorama-style "Phase Shift": AE's stock rotation dial (revolutions + degrees).
+    // One full revolution = one full period of the selected Loop mode (see
+    // ApplyOffsetLoop in ../core/Interpolation.h), so 0->360 animates as a seamless loop.
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_ANGLE("Offset", 0, OFFSET_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_POPUP("Loop", 3, LoopPopup_CYCLE, "Cycle|Wave|Bounce", LOOP_DISK_ID);
+
+    AEFX_CLR_STRUCT(def);
+    PF_END_TOPIC(MOTION_TOPIC_END_DISK_ID);
 
     out_data->num_params = GRADREMAP_NUM_PARAMS;
 
@@ -470,26 +504,42 @@ static PF_Err PreRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderEx
 static PF_Err SmartRender(PF_InData* in_data, PF_OutData* out_data, PF_SmartRenderExtra* extra) {
     PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
     PF_EffectWorld *input_worldP = nullptr, *output_worldP = nullptr;
-    PF_ParamDef clamp_param, dither_param, deband_threshold_param;
+    PF_ParamDef clamp_param, dither_param, offset_param, loop_param;
+    AEFX_CLR_STRUCT(offset_param);
+    AEFX_CLR_STRUCT(loop_param);
     AEFX_CLR_STRUCT(clamp_param);
     AEFX_CLR_STRUCT(dither_param);
-    AEFX_CLR_STRUCT(deband_threshold_param);
 
     ERR(extra->cb->checkout_layer_pixels(in_data->effect_ref, GRADREMAP_INPUT, &input_worldP));
     ERR(extra->cb->checkout_output(in_data->effect_ref, &output_worldP));
 
+    ERR(PF_CHECKOUT_PARAM(in_data, GRADREMAP_OFFSET, in_data->current_time, in_data->time_step, in_data->time_scale,
+                           &offset_param));
+    ERR(PF_CHECKOUT_PARAM(in_data, GRADREMAP_LOOP, in_data->current_time, in_data->time_step, in_data->time_scale,
+                           &loop_param));
     ERR(PF_CHECKOUT_PARAM(in_data, GRADREMAP_CLAMP_INPUT, in_data->current_time, in_data->time_step,
                            in_data->time_scale, &clamp_param));
     ERR(PF_CHECKOUT_PARAM(in_data, GRADREMAP_DITHER, in_data->current_time, in_data->time_step, in_data->time_scale,
                            &dither_param));
-    ERR(PF_CHECKOUT_PARAM(in_data, GRADREMAP_DEBAND_THRESHOLD, in_data->current_time, in_data->time_step,
-                           in_data->time_scale, &deband_threshold_param));
 
     RemapRefcon refcon;
     if (!err) {
+        // Divide in double: a many-revolution angle in float would lose sub-degree precision.
+        refcon.offset_revolutions = static_cast<float>(FIX_2_FLOAT(offset_param.u.ad.value) / 360.0);
+        switch (loop_param.u.pd.value) {
+            case LoopPopup_WAVE:
+                refcon.loop_mode = LoopMode::Sine;
+                break;
+            case LoopPopup_BOUNCE:
+                refcon.loop_mode = LoopMode::Bounce;
+                break;
+            case LoopPopup_CYCLE:
+            default:
+                refcon.loop_mode = LoopMode::Cycle;
+                break;
+        }
         refcon.clamp_input = clamp_param.u.bd.value;
         refcon.dither = dither_param.u.bd.value;
-        refcon.deband_threshold = static_cast<float>(deband_threshold_param.u.fs_d.value);
         refcon.working_space_gamma = GradientRemap_QueryWorkingSpaceGamma(in_data);
         refcon.input_world = input_worldP;
         ERR(BuildGradientFromParams(in_data, &refcon.gradient));
@@ -504,9 +554,10 @@ static PF_Err SmartRender(PF_InData* in_data, PF_OutData* out_data, PF_SmartRend
         ERR(PF_COPY(input_worldP, output_worldP, NULL, NULL));
     }
 
+    ERR2(PF_CHECKIN_PARAM(in_data, &offset_param));
+    ERR2(PF_CHECKIN_PARAM(in_data, &loop_param));
     ERR2(PF_CHECKIN_PARAM(in_data, &clamp_param));
     ERR2(PF_CHECKIN_PARAM(in_data, &dither_param));
-    ERR2(PF_CHECKIN_PARAM(in_data, &deband_threshold_param));
 
     return err;
 }

@@ -15,6 +15,17 @@ float ClampUnit(float v);
 float Lerp(float a, float b, float t);
 float SmoothStep(float t);
 
+// "Offset" dial + "Loop" popup (Colorama-style phase shift). Shifts the lookup position
+// `t` by `offset_revolutions` (dial angle / 360) and folds the result back into [0,1]:
+//  - Cycle:  wraps (modulo 1). Values already in [0,1] pass through untouched, so offset 0
+//            is an exact identity (pure white stays at 1 rather than wrapping to 0).
+//  - Bounce: ping-pong/triangle wave, period 2 in t -- identity on [0,1] at offset 0.
+//  - Sine:   smooth (raised-cosine) version of Bounce, same period; eases into each end.
+// One full revolution always advances exactly one full period of the chosen mode, so
+// animating the dial 0->360 degrees loops seamlessly in every mode.
+enum class LoopMode { Cycle, Sine, Bounce };
+float ApplyOffsetLoop(float t, float offset_revolutions, LoopMode mode);
+
 // Working-space <-> linear-light transfer function. `gamma <= 0` (the default) uses
 // the precise sRGB piecewise EOTF/OETF -- this is the Phase 1 behaviour and what every
 // existing GradientRemapCoreTests case exercises. `gamma > 0` uses a plain power-law
