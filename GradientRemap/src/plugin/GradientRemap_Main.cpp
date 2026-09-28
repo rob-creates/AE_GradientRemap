@@ -40,6 +40,7 @@ struct RemapRefcon {
     // the per-pixel work is just luma + loop + a table read (see GradientLUT).
     GradientRemap::GradientLUT lut;
     float offset_revolutions; // "Offset" dial, degrees / 360
+    float cycles;             // "Cycles" slider: input-range repeat count
     LoopMode loop_mode;
     PF_Boolean clamp_input;
     PF_Boolean dither;
@@ -52,7 +53,7 @@ struct RemapRefcon {
 // reachable t. (Pre-2026-09-28 the >1/<0 case extrapolated past the end knots instead;
 // that path became unreachable with Offset/Loop and was removed.)
 RGBAf LookupLooped(const RemapRefcon* rc, float luma) {
-    return rc->lut.Sample(GradientRemap::ApplyOffsetLoop(luma, rc->offset_revolutions, rc->loop_mode));
+    return rc->lut.Sample(GradientRemap::ApplyOffsetLoop(luma, rc->offset_revolutions, rc->cycles, rc->loop_mode));
 }
 
 // Normalize an integer channel value to [0,1] -- shared by SampleLumaAlpha8Clamped and
@@ -330,7 +331,8 @@ void GradientRemap_ApplyInterpPopups(GradientData& g, A_long interp_mode_popup_v
 }
 
 static PF_Err About(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* /*params*/[], PF_LayerDef* /*output*/) {
-    PF_SPRINTF(out_data->return_msg, "%s v%d.%d\r%s", NAME, MAJOR_VERSION, MINOR_VERSION, DESCRIPTION);
+    PF_SPRINTF(out_data->return_msg, "%s v%d.%d\r%s\r%s\r%s", NAME, MAJOR_VERSION, MINOR_VERSION, DESCRIPTION,
+               COPYRIGHT, LICENSE_NOTE);
     return PF_Err_NONE;
 }
 
@@ -348,11 +350,6 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
     PF_Err err = PF_Err_NONE;
     PF_ParamDef def;
 
-    // Twirl-down groups (2026-09-28, user request). Each start/end marker is a param in
-    // its own right -- see the GRADREMAP_* enum in GradientRemap.h.
-    AEFX_CLR_STRUCT(def);
-    PF_ADD_TOPIC("Colour", COLOUR_TOPIC_START_DISK_ID);
-
     // Phase 3 custom gradient-bar UI (see docs/DESIGN.md): the knot list lives entirely
     // in this one arbitrary-data param, drawn/edited by GradientRemap_UI.cpp. Its default
     // handle is the same 2-knot black->white GradientData::Default() every other code
@@ -363,6 +360,12 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
     PF_ADD_ARBITRARY2("Gradient", kGradientBarWidth, kGradientUITotalHeight, 0,
                        PF_PUI_CONTROL | PF_PUI_DONT_ERASE_CONTROL, def.u.arb_d.dephault, GRADIENT_DISK_ID,
                        GRADIENT_ARB_REFCON);
+
+    // Twirl-down groups (2026-09-28, user request); the gradient bar stays on its own
+    // above them. Each start/end marker is a param in its own right -- see the GRADREMAP_*
+    // enum in GradientRemap.h.
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_TOPIC("Options", OPTIONS_TOPIC_START_DISK_ID);
 
     // Displayed as "Colour Space" (2026-09-25, user feedback) -- picks which colour
     // space the blend math happens in; kept as GRADREMAP_INTERP_MODE/InterpMode
@@ -395,10 +398,10 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
     PF_ADD_BUTTON("Load Gradient...", "Load Gradient...", 0, PF_ParamFlag_SUPERVISE, LOAD_BUTTON_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
-    PF_END_TOPIC(COLOUR_TOPIC_END_DISK_ID);
+    PF_END_TOPIC(OPTIONS_TOPIC_END_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
-    PF_ADD_TOPIC("Motion", MOTION_TOPIC_START_DISK_ID);
+    PF_ADD_TOPIC("Range", RANGE_TOPIC_START_DISK_ID);
 
     // Colorama-style "Phase Shift": AE's stock rotation dial (revolutions + degrees).
     // One full revolution = one full period of the selected Loop mode (see
@@ -406,11 +409,17 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
     AEFX_CLR_STRUCT(def);
     PF_ADD_ANGLE("Offset", 0, OFFSET_DISK_ID);
 
+    // How many times the input range repeats (like TouchDesigner Ramp's "Period", but
+    // expressed as a repeat count): 1 = unscaled, 2 = the gradient plays twice. See
+    // ApplyOffsetLoop.
+    AEFX_CLR_STRUCT(def);
+    PF_ADD_FLOAT_SLIDERX("Cycles", 0.0, 100.0, 0.0, 10.0, 1.0, 2, 0, 0, CYCLES_DISK_ID);
+
     AEFX_CLR_STRUCT(def);
     PF_ADD_POPUP("Loop", 3, LoopPopup_CYCLE, "Cycle|Wave|Bounce", LOOP_DISK_ID);
 
     AEFX_CLR_STRUCT(def);
-    PF_END_TOPIC(MOTION_TOPIC_END_DISK_ID);
+    PF_END_TOPIC(RANGE_TOPIC_END_DISK_ID);
 
     out_data->num_params = GRADREMAP_NUM_PARAMS;
 
@@ -458,8 +467,9 @@ static PF_Err PreRender(PF_InData* in_data, PF_OutData* out_data, PF_PreRenderEx
 static PF_Err SmartRender(PF_InData* in_data, PF_OutData* out_data, PF_SmartRenderExtra* extra) {
     PF_Err err = PF_Err_NONE, err2 = PF_Err_NONE;
     PF_EffectWorld *input_worldP = nullptr, *output_worldP = nullptr;
-    PF_ParamDef clamp_param, dither_param, offset_param, loop_param;
+    PF_ParamDef clamp_param, dither_param, offset_param, cycles_param, loop_param;
     AEFX_CLR_STRUCT(offset_param);
+    AEFX_CLR_STRUCT(cycles_param);
     AEFX_CLR_STRUCT(loop_param);
     AEFX_CLR_STRUCT(clamp_param);
     AEFX_CLR_STRUCT(dither_param);
@@ -469,6 +479,8 @@ static PF_Err SmartRender(PF_InData* in_data, PF_OutData* out_data, PF_SmartRend
 
     ERR(PF_CHECKOUT_PARAM(in_data, GRADREMAP_OFFSET, in_data->current_time, in_data->time_step, in_data->time_scale,
                            &offset_param));
+    ERR(PF_CHECKOUT_PARAM(in_data, GRADREMAP_CYCLES, in_data->current_time, in_data->time_step, in_data->time_scale,
+                           &cycles_param));
     ERR(PF_CHECKOUT_PARAM(in_data, GRADREMAP_LOOP, in_data->current_time, in_data->time_step, in_data->time_scale,
                            &loop_param));
     ERR(PF_CHECKOUT_PARAM(in_data, GRADREMAP_CLAMP_INPUT, in_data->current_time, in_data->time_step,
@@ -481,6 +493,7 @@ static PF_Err SmartRender(PF_InData* in_data, PF_OutData* out_data, PF_SmartRend
     if (!err) {
         // Divide in double: a many-revolution angle in float would lose sub-degree precision.
         refcon.offset_revolutions = static_cast<float>(FIX_2_FLOAT(offset_param.u.ad.value) / 360.0);
+        refcon.cycles = static_cast<float>(cycles_param.u.fs_d.value);
         switch (loop_param.u.pd.value) {
             case LoopPopup_WAVE:
                 refcon.loop_mode = LoopMode::Sine;
@@ -510,6 +523,7 @@ static PF_Err SmartRender(PF_InData* in_data, PF_OutData* out_data, PF_SmartRend
     }
 
     ERR2(PF_CHECKIN_PARAM(in_data, &offset_param));
+    ERR2(PF_CHECKIN_PARAM(in_data, &cycles_param));
     ERR2(PF_CHECKIN_PARAM(in_data, &loop_param));
     ERR2(PF_CHECKIN_PARAM(in_data, &clamp_param));
     ERR2(PF_CHECKIN_PARAM(in_data, &dither_param));
@@ -521,8 +535,9 @@ extern "C" DllExport PF_Err PluginDataEntryFunction2(PF_PluginDataPtr inPtr, PF_
                                                       SPBasicSuite* inSPBasicSuitePtr, const char* inHostName,
                                                       const char* inHostVersion) {
     PF_Err result = PF_Err_INVALID_CALLBACK;
-    result = PF_REGISTER_EFFECT_EXT2(inPtr, inPluginDataCallBackPtr, NAME, "ADBE Gradient Remap", "Sample Plug-ins",
-                                      AE_RESERVED_INFO, "EffectMain", "https://www.adobe.com");
+    // Category must match the PiPL's Category (GradientRemapPiPL.r).
+    result = PF_REGISTER_EFFECT_EXT2(inPtr, inPluginDataCallBackPtr, NAME, MATCH_NAME, "Color Correction",
+                                      AE_RESERVED_INFO, "EffectMain", SUPPORT_URL);
     return result;
 }
 

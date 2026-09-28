@@ -33,6 +33,13 @@
 
 #define NAME "Gradient Remap"
 #define DESCRIPTION "Luminance-to-gradient colour remap."
+#define COPYRIGHT "\xC2\xA9 Ragged Edge 2025" // UTF-8 copyright sign
+#define LICENSE_NOTE "Freeware. Provided as is, without warranty or support. See LICENSE.txt."
+// MATCH_NAME/SUPPORT_URL must match AE_Effect_Match_Name/AE_Effect_Support_URL in
+// GradientRemapPiPL.r. MATCH_NAME is how AE identifies the effect in saved projects:
+// changing it after release orphans existing instances.
+#define MATCH_NAME "RE Gradient Remap"
+#define SUPPORT_URL ""
 
 // Phase 3 (see docs/DESIGN.md): a real custom multi-knot gradient-bar UI, replacing
 // Phase 2's throwaway fixed-4-knot stock-param UI. The knot list lives in a single
@@ -52,24 +59,25 @@
 // Order here MUST match the PF_ADD_* call order in ParamsSetup (GradientRemap_Main.cpp)
 // -- params[] is positional, assigned strictly by registration order, not by these
 // names. GRADREMAP_GRADIENT listed right after GRADREMAP_INPUT (2026-09-25, user
-// request) so the gradient bar is the first visible parameter. Grouped into "Colour" and
-// "Motion" twirl-down topics (2026-09-28, user request) -- each topic's start/end marker
-// is itself a param and occupies a slot here.
+// request) so the gradient bar is the first visible parameter, on its own above the
+// "Options" and "Range" twirl-down topics (2026-09-28, user request) -- each topic's
+// start/end marker is itself a param and occupies a slot here.
 enum {
     GRADREMAP_INPUT = 0,
-    GRADREMAP_COLOUR_TOPIC_START,
     GRADREMAP_GRADIENT,
+    GRADREMAP_OPTIONS_TOPIC_START,
     GRADREMAP_INTERP_MODE,
     GRADREMAP_PATH,
     GRADREMAP_DITHER,
     GRADREMAP_CLAMP_INPUT,
     GRADREMAP_SAVE_BUTTON,
     GRADREMAP_LOAD_BUTTON,
-    GRADREMAP_COLOUR_TOPIC_END,
-    GRADREMAP_MOTION_TOPIC_START,
+    GRADREMAP_OPTIONS_TOPIC_END,
+    GRADREMAP_RANGE_TOPIC_START,
     GRADREMAP_OFFSET,
+    GRADREMAP_CYCLES,
     GRADREMAP_LOOP,
-    GRADREMAP_MOTION_TOPIC_END,
+    GRADREMAP_RANGE_TOPIC_END,
     GRADREMAP_NUM_PARAMS
 };
 
@@ -84,10 +92,11 @@ enum {
     LOAD_BUTTON_DISK_ID,
     OFFSET_DISK_ID,
     LOOP_DISK_ID,
-    COLOUR_TOPIC_START_DISK_ID,
-    COLOUR_TOPIC_END_DISK_ID,
-    MOTION_TOPIC_START_DISK_ID,
-    MOTION_TOPIC_END_DISK_ID
+    OPTIONS_TOPIC_START_DISK_ID, // was "Colour" (renamed 2026-09-28)
+    OPTIONS_TOPIC_END_DISK_ID,
+    RANGE_TOPIC_START_DISK_ID, // was "Motion" (renamed 2026-09-28)
+    RANGE_TOPIC_END_DISK_ID,
+    CYCLES_DISK_ID
 };
 
 // NOTE (2026-09-25): AE displays this popup as "Colour Space", not "Interpolation" --

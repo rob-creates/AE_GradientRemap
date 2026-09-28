@@ -18,16 +18,20 @@ float ClampUnit(float v);
 float Lerp(float a, float b, float t);
 float SmoothStep(float t);
 
-// "Offset" dial + "Loop" popup (Colorama-style phase shift). Shifts the lookup position
-// `t` by `offset_revolutions` (dial angle / 360) and folds the result back into [0,1]:
-//  - Cycle:  wraps (modulo 1). Values already in [0,1] pass through untouched, so offset 0
-//            is an exact identity (pure white stays at 1 rather than wrapping to 0).
-//  - Bounce: ping-pong/triangle wave, period 2 in t -- identity on [0,1] at offset 0.
+// "Offset" dial + "Cycles" + "Loop" popup (Colorama-style phase shift, plus a
+// TouchDesigner-Ramp-style repeat count). Scales the lookup position `t` by `cycles`
+// (how many times the input range repeats across [0,1]: 1 = unscaled, 2 = the gradient
+// plays twice), shifts it by `offset_revolutions` (dial angle / 360), then folds the
+// result back into [0,1]:
+//  - Cycle:  wraps (modulo 1). Exact positive whole numbers land on 1, not 0, so with
+//            zero offset and whole-number cycles, t=0 -> 0 and t=1 -> 1 (black and white
+//            still map to the first/last knot).
+//  - Bounce: ping-pong/triangle wave, period 2 -- identity on [0,1] at offset 0, cycles 1.
 //  - Sine:   smooth (raised-cosine) version of Bounce, same period; eases into each end.
 // One full revolution always advances exactly one full period of the chosen mode, so
 // animating the dial 0->360 degrees loops seamlessly in every mode.
 enum class LoopMode { Cycle, Sine, Bounce };
-float ApplyOffsetLoop(float t, float offset_revolutions, LoopMode mode);
+float ApplyOffsetLoop(float t, float offset_revolutions, float cycles, LoopMode mode);
 
 // Working-space <-> linear-light transfer function. `gamma <= 0` (the default) uses
 // the precise sRGB piecewise EOTF/OETF -- this is the Phase 1 behaviour and what every

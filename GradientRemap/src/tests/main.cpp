@@ -354,18 +354,18 @@ void TestOffsetLoop() {
         bool identity = true;
         for (int i = 0; i <= 20; ++i) {
             float t = i / 20.0f;
-            identity = identity && Near(ApplyOffsetLoop(t, 0.0f, m), t);
+            identity = identity && Near(ApplyOffsetLoop(t, 0.0f, 1.0f, m), t);
         }
         Check(identity, std::string("offset loop: zero offset is an exact identity on [0,1] (") +
                             (m == LoopMode::Cycle ? "Cycle" : "Bounce") + ")");
     }
-    Check(Near(ApplyOffsetLoop(0.0f, 0.0f, LoopMode::Sine), 0.0f) && Near(ApplyOffsetLoop(1.0f, 0.0f, LoopMode::Sine), 1.0f),
+    Check(Near(ApplyOffsetLoop(0.0f, 0.0f, 1.0f, LoopMode::Sine), 0.0f) && Near(ApplyOffsetLoop(1.0f, 0.0f, 1.0f, LoopMode::Sine), 1.0f),
           "offset loop: Sine maps 0->0 and 1->1 at zero offset");
 
-    Check(Near(ApplyOffsetLoop(0.9f, 0.25f, LoopMode::Cycle), 0.15f), "offset loop: Cycle wraps past 1");
-    Check(Near(ApplyOffsetLoop(0.1f, -0.25f, LoopMode::Cycle), 0.85f), "offset loop: Cycle wraps below 0");
-    Check(Near(ApplyOffsetLoop(0.9f, 0.1f, LoopMode::Bounce), 0.9f), "offset loop: Bounce reflects off 1 (0.9 + 0.2 -> 0.9)");
-    Check(Near(ApplyOffsetLoop(0.0f, 0.5f, LoopMode::Bounce), 1.0f), "offset loop: Bounce half revolution reverses the ramp");
+    Check(Near(ApplyOffsetLoop(0.9f, 0.25f, 1.0f, LoopMode::Cycle), 0.15f), "offset loop: Cycle wraps past 1");
+    Check(Near(ApplyOffsetLoop(0.1f, -0.25f, 1.0f, LoopMode::Cycle), 0.85f), "offset loop: Cycle wraps below 0");
+    Check(Near(ApplyOffsetLoop(0.9f, 0.1f, 1.0f, LoopMode::Bounce), 0.9f), "offset loop: Bounce reflects off 1 (0.9 + 0.2 -> 0.9)");
+    Check(Near(ApplyOffsetLoop(0.0f, 0.5f, 1.0f, LoopMode::Bounce), 1.0f), "offset loop: Bounce half revolution reverses the ramp");
 
     // One full revolution returns every mode to where it started (seamless animation loop).
     const LoopMode all[] = {LoopMode::Cycle, LoopMode::Sine, LoopMode::Bounce};
@@ -373,10 +373,24 @@ void TestOffsetLoop() {
     for (LoopMode m : all) {
         for (int i = 0; i <= 20; ++i) {
             float t = i / 20.0f;
-            periodic = periodic && Near(ApplyOffsetLoop(t, 1.0f, m), ApplyOffsetLoop(t, 0.0f, m), 1e-4f);
+            periodic = periodic && Near(ApplyOffsetLoop(t, 1.0f, 1.0f, m), ApplyOffsetLoop(t, 0.0f, 1.0f, m), 1e-4f);
         }
     }
     Check(periodic, "offset loop: one full revolution is a full period in every mode");
+
+    // Cycles: how many times the input range repeats.
+    Check(Near(ApplyOffsetLoop(0.25f, 0.0f, 2.0f, LoopMode::Cycle), 0.5f) &&
+              Near(ApplyOffsetLoop(0.75f, 0.0f, 2.0f, LoopMode::Cycle), 0.5f),
+          "cycles: 2 cycles plays the ramp twice (Cycle)");
+    bool endsExact = true;
+    for (float c : {1.0f, 2.0f, 3.0f, 7.0f}) {
+        endsExact = endsExact && ApplyOffsetLoop(0.0f, 0.0f, c, LoopMode::Cycle) == 0.0f &&
+                    ApplyOffsetLoop(1.0f, 0.0f, c, LoopMode::Cycle) == 1.0f;
+    }
+    Check(endsExact, "cycles: black->0 and white->1 exactly for whole-number cycles (Cycle)");
+    Check(Near(ApplyOffsetLoop(1.0f, 0.0f, 2.0f, LoopMode::Bounce), 0.0f),
+          "cycles: 2 cycles of Bounce goes up and back down (white -> 0)");
+    Check(Near(ApplyOffsetLoop(1.0f, 0.0f, 0.5f, LoopMode::Cycle), 0.5f), "cycles: 0.5 cycles plays half the ramp");
 }
 
 // GradientLUT (per-frame lookup table used by the plugin) vs. exact EvaluateGradient.

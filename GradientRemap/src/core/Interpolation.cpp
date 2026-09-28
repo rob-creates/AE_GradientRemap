@@ -11,16 +11,19 @@ float ClampUnit(float v) { return std::min(1.0f, std::max(0.0f, v)); }
 
 float SmoothStep(float t) { return t * t * (3.0f - 2.0f * t); }
 
-float ApplyOffsetLoop(float t, float offset_revolutions, LoopMode mode) {
+float ApplyOffsetLoop(float t, float offset_revolutions, float cycles, LoopMode mode) {
     constexpr float kPi = 3.14159265358979323846f;
     if (mode == LoopMode::Cycle) {
-        // Reduce to [0,1) first so every whole revolution is an exact identity -- otherwise
-        // offset 1.0 would push black (t=0) to exactly 1.0 and render it as white.
-        float u = t + (offset_revolutions - std::floor(offset_revolutions));
-        return (u >= 0.0f && u <= 1.0f) ? u : u - std::floor(u);
+        // Reduce the offset to [0,1) first so every whole revolution is an exact identity --
+        // otherwise offset 1.0 would push black (t=0) to exactly 1.0 and render it as white.
+        float u = t * cycles + (offset_revolutions - std::floor(offset_revolutions));
+        // (0,1] for positive u (whole numbers land on 1, the end of a repeat), [0,1) for
+        // u <= 0 (negative only from unclamped 32bpc input). NaN falls through to NaN,
+        // which GradientLUT::Sample maps to t=0.
+        return (u > 0.0f) ? u - std::ceil(u) + 1.0f : u - std::floor(u);
     }
-    // Bounce/Sine have period 2 in t, so one revolution = 2 units of t.
-    float u = t + 2.0f * offset_revolutions;
+    // Bounce/Sine have period 2, so one revolution = 2 units.
+    float u = t * cycles + 2.0f * offset_revolutions;
     if (mode == LoopMode::Sine) return 0.5f - 0.5f * std::cos(kPi * u);
     float m = u - 2.0f * std::floor(u * 0.5f); // [0,2)
     return m <= 1.0f ? m : 2.0f - m;

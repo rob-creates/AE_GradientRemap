@@ -14,7 +14,10 @@ resource 'PiPL' (16000) {
             "Gradient Remap"
         },
         Category {
-            "Sample Plug-ins"
+            // Joins AE's built-in "Color Correction" group (US spelling must match exactly).
+            // Must also match the category passed to PF_REGISTER_EFFECT_EXT2 in
+            // GradientRemap_Main.cpp.
+            "Color Correction"
         },
 #ifdef AE_OS_WIN
     #if defined(AE_PROC_INTELx64)
@@ -63,13 +66,17 @@ resource 'PiPL' (16000) {
             0x08001400
         },
         AE_Effect_Match_Name {
-            "ADBE Gradient Remap"
+            // Must match MATCH_NAME in GradientRemap.h. This is how AE identifies the effect
+            // in saved projects -- changing it after release orphans existing instances.
+            // ("ADBE" prefixes are reserved for Adobe's own effects.)
+            "RE Gradient Remap"
         },
         AE_Reserved_Info {
             0
         },
         AE_Effect_Support_URL {
-            "https://www.adobe.com"
+            // Must match SUPPORT_URL in GradientRemap.h. Empty: unsupported freeware.
+            ""
         }
     }
 };
