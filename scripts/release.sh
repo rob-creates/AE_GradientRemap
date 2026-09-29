@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds a universal, Developer ID-signed, notarized and stapled GradientRemap.plugin and
+# Builds an Apple Silicon (arm64), Developer ID-signed, notarized and stapled GradientRemap.plugin and
 # packages it with LICENSE.txt into dist/GradientRemap-v<version>-macOS.zip.
 #
 # One-time setup (stores an app-specific password in the login keychain):
@@ -21,10 +21,10 @@ MINOR=$(awk '/#define MINOR_VERSION/ {print $3}' "$ROOT/GradientRemap/src/plugin
 VERSION="$MAJOR.$MINOR"
 ZIP_NAME="GradientRemap-v$VERSION-macOS.zip"
 
-echo "==> Building v$VERSION (universal, clean)"
+echo "==> Building v$VERSION (arm64, clean)"
 rm -rf "$BUILD"
 cmake -S "$ROOT" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+    -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DGRADIENT_REMAP_CODESIGN_IDENTITY="$SIGN_IDENTITY" >/dev/null
 cmake --build "$BUILD"
 ctest --test-dir "$BUILD" --output-on-failure
