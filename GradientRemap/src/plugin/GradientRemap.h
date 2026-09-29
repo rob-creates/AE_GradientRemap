@@ -65,6 +65,7 @@
 enum {
     GRADREMAP_INPUT = 0,
     GRADREMAP_GRADIENT,
+    GRADREMAP_KNOT_POSITION,
     GRADREMAP_OPTIONS_TOPIC_START,
     GRADREMAP_INTERP_MODE,
     GRADREMAP_PATH,
@@ -96,7 +97,8 @@ enum {
     OPTIONS_TOPIC_END_DISK_ID,
     RANGE_TOPIC_START_DISK_ID, // was "Motion" (renamed 2026-09-28)
     RANGE_TOPIC_END_DISK_ID,
-    CYCLES_DISK_ID
+    CYCLES_DISK_ID,
+    KNOT_POSITION_DISK_ID
 };
 
 // NOTE (2026-09-25): AE displays this popup as "Colour Space", not "Interpolation" --
@@ -207,6 +209,11 @@ PF_Err GradientRemap_WriteGradientAndMarkChanged(PF_InData* in_data, PF_ParamDef
 PF_Err GradientRemap_HandleEvent(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], PF_LayerDef* output,
                                   PF_EventExtra* extra);
 PF_Err GradientRemap_SequenceSetup(PF_InData* in_data, PF_OutData* out_data);
+// "Knot Position" field (GRADREMAP_KNOT_POSITION): a control-only, supervised float
+// slider mirroring the selected knot's position (0-100%). Selecting/dragging a knot in
+// the bar updates it; editing it moves the selected knot. Called from
+// GradientRemap_HandleUserChangedParam (GradientRemap_SaveLoad.cpp).
+PF_Err GradientRemap_HandleKnotPositionChanged(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[]);
 PF_Err GradientRemap_SequenceSetdown(PF_InData* in_data, PF_OutData* out_data);
 PF_Err GradientRemap_SequenceResetup(PF_InData* in_data, PF_OutData* out_data);
 PF_Err GradientRemap_SequenceFlatten(PF_InData* in_data, PF_OutData* out_data);

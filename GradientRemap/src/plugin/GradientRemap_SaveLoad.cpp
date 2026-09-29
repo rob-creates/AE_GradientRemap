@@ -74,5 +74,8 @@ PF_Err GradientRemap_HandleUserChangedParam(PF_InData* in_data, PF_OutData* out_
     if (which_hit->param_index == GRADREMAP_LOAD_BUTTON) {
         return HandleLoadButton(in_data, out_data, params);
     }
+    if (which_hit->param_index == GRADREMAP_KNOT_POSITION) {
+        return GradientRemap_HandleKnotPositionChanged(in_data, out_data, params);
+    }
     return PF_Err_NONE;
 }
