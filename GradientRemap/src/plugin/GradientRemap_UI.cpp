@@ -138,6 +138,31 @@ PF_Err AcquireBackgroundColor(PF_InData* in_data, PF_OutData* out_data, DRAWBOT_
     return err;
 }
 
+// Mirrors the selected knot into the "Knot Position" field (0-100%). The value goes
+// through PF_ChangeFlag_CHANGED_VALUE (the same route the arb param already uses from
+// these events); PF_UpdateParamUI pushes it to the field's display and keeps its slider
+// twirl-down collapsed. The field is never greyed out (2026-09-29, user feedback: going
+// grey only after a deletion felt inconsistent); with nothing selected it just keeps its
+// last value, and editing it does nothing (see GradientRemap_HandleKnotPositionChanged).
+// Only touches the field when the value actually differs, so merely re-clicking the
+// selected knot doesn't add an undo step.
+PF_Err SyncKnotPositionControl(PF_InData* in_data, PF_ParamDef* params[], const GradientData& g, A_long selected) {
+    if (selected < 0 || selected >= static_cast<A_long>(g.knots.size())) return PF_Err_NONE;
+
+    PF_ParamDef* field = params[GRADREMAP_KNOT_POSITION];
+    PF_FpLong wanted = static_cast<PF_FpLong>(g.knots[static_cast<size_t>(selected)].position) * 100.0;
+    if (std::fabs(field->u.fs_d.value - wanted) <= 1e-6) return PF_Err_NONE;
+
+    field->u.fs_d.value = wanted;
+    field->uu.change_flags |= PF_ChangeFlag_CHANGED_VALUE;
+
+    PF_ParamDef updated = *field; // PF_UpdateParamUI wants a copy, not the live param
+    updated.flags |= PF_ParamFlag_COLLAPSE_TWIRLY; // keep the slider bar hidden: number only
+    updated.ui_flags &= ~PF_PUI_DISABLED;          // clear any greyed state from earlier builds
+    AEGP_SuiteHandler suites(in_data->pica_basicP);
+    return suites.ParamUtilsSuite3()->PF_UpdateParamUI(in_data->effect_ref, GRADREMAP_KNOT_POSITION, &updated);
+}
+
 PF_Err InvalidateWholeControl(PF_InData* in_data, PF_OutData* out_data, PF_EventExtra* event_extra) {
     PF_Err err = PF_Err_NONE;
     AEGP_SuiteHandler suites(in_data->pica_basicP);
@@ -348,7 +373,10 @@ PF_Err DoClick(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], 
         event_extra->u.do_click.send_drag = TRUE;
     }
 
+    A_long selected = seq ? seq->selected_knot_index : -1;
     UnlockSeqData(in_data);
+
+    if (!err) err = SyncKnotPositionControl(in_data, params, g, selected);
 
     PF_Err inval_err = InvalidateWholeControl(in_data, out_data, event_extra);
     return err ? err : inval_err;
@@ -397,13 +425,18 @@ PF_Err DoDrag(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[], P
     if (seq) {
         if (last_time) {
             seq->delete_pending = FALSE;
-            seq->selected_knot_index = should_delete_now ? -1 : dragged_index;
+            // After a deletion, select the knot to its left (or the new first knot) so the
+            // Knot Position field always refers to a live knot rather than the deleted one.
+            seq->selected_knot_index = should_delete_now ? std::max(dragged_index - 1, 0) : dragged_index;
         } else {
             seq->selected_knot_index = dragged_index;
             seq->delete_pending = delete_pending;
         }
     }
+    A_long selected = seq ? seq->selected_knot_index : -1;
     UnlockSeqData(in_data);
+
+    if (!err) err = SyncKnotPositionControl(in_data, params, g, selected);
 
     PF_Err inval_err = InvalidateWholeControl(in_data, out_data, event_extra);
     return err ? err : inval_err;
@@ -424,6 +457,30 @@ PF_Err ChangeCursor(PF_InData* in_data, PF_ParamDef* params[], PF_EventExtra* ev
 }
 
 } // namespace
+
+PF_Err GradientRemap_HandleKnotPositionChanged(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[]) {
+    GradientData g = GradientRemap_UnflattenArbHandle(in_data, params[GRADREMAP_GRADIENT]->u.arb_d.value);
+
+    GradientUISeqData* seq = LockSeqData(in_data);
+    A_long selected = seq ? seq->selected_knot_index : -1;
+    if (selected < 0 || selected >= static_cast<A_long>(g.knots.size())) {
+        UnlockSeqData(in_data);
+        return PF_Err_NONE; // no knot selected yet (fresh or reopened effect); nothing to move
+    }
+
+    // Same free-reordering move as dragging (see DoDrag): the knot may pass its
+    // neighbours, and the selection follows it to its post-sort index.
+    float t = ClampUnit(static_cast<float>(params[GRADREMAP_KNOT_POSITION]->u.fs_d.value / 100.0));
+    int new_index = IndexAfterSortedInsert(g.knots, static_cast<int>(selected), t);
+    g.knots[static_cast<size_t>(selected)].position = t;
+    g.SortKnots();
+    seq->selected_knot_index = new_index;
+    UnlockSeqData(in_data);
+
+    PF_Err err = GradientRemap_WriteGradientAndMarkChanged(in_data, params, g);
+    out_data->out_flags |= PF_OutFlag_REFRESH_UI; // redraw the bar with the moved knot
+    return err;
+}
 
 PF_Err GradientRemap_HandleEvent(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[],
                                   PF_LayerDef* /*output*/, PF_EventExtra* extra) {
@@ -477,6 +534,11 @@ PF_Err GradientRemap_SequenceSetdown(PF_InData* in_data, PF_OutData* /*out_data*
 
 PF_Err GradientRemap_SequenceResetup(PF_InData* in_data, PF_OutData* out_data) {
     if (in_data->sequence_data) {
+        // Selection is transient: start unselected on reopen/duplicate (the "Knot
+        // Position" field is control-only, so it doesn't keep its value either).
+        GradientUISeqData* seq = LockSeqData(in_data);
+        if (seq) seq->selected_knot_index = -1;
+        UnlockSeqData(in_data);
         out_data->sequence_data = in_data->sequence_data;
         return PF_Err_NONE;
     }

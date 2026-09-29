@@ -361,6 +361,21 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
                        PF_PUI_CONTROL | PF_PUI_DONT_ERASE_CONTROL, def.u.arb_d.dephault, GRADIENT_DISK_ID,
                        GRADIENT_ARB_REFCON);
 
+    // Numeric position of the selected knot, in %. PF_PUI_STD_CONTROL_ONLY: a plain
+    // Effect Controls field with no data stream (no keyframes/timeline row) -- the SDK's
+    // documented way to put a standard control in front of arbitrary data. Kept in sync
+    // with the selected knot by SyncKnotPositionControl (GradientRemap_UI.cpp).
+    // PF_ADD_FLOAT_SLIDERX would clear ui_flags, hence the plain macro. Starts twirled
+    // shut so only the numeric field shows (AE has no flag to remove a slider's bar; it
+    // lives in the twirl-down) -- re-collapsed on each selection change, see
+    // SyncKnotPositionControl.
+    AEFX_CLR_STRUCT(def);
+    def.flags = PF_ParamFlag_SUPERVISE | PF_ParamFlag_CANNOT_TIME_VARY | PF_ParamFlag_CANNOT_INTERP |
+                PF_ParamFlag_START_COLLAPSED;
+    def.ui_flags = PF_PUI_STD_CONTROL_ONLY;
+    PF_ADD_FLOAT_SLIDER("Knot Position", 0, 100, 0, 100, AEFX_DEFAULT_CURVE_TOLERANCE, 0, 2,
+                        PF_ValueDisplayFlag_PERCENT, false, KNOT_POSITION_DISK_ID);
+
     // Twirl-down groups (2026-09-28, user request); the gradient bar stays on its own
     // above them. Each start/end marker is a param in its own right -- see the GRADREMAP_*
     // enum in GradientRemap.h.
