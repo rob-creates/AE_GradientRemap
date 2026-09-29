@@ -8,3 +8,6 @@ test_output/
 
 # macOS
 .DS_Store
+
+# Release packages (scripts/release.sh)
+dist/

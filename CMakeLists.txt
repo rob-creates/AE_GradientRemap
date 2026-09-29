@@ -1,4 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
+
+# Must precede project(). Without it the binary's minimum macOS is the build machine's
+# own version, so a plugin built on macOS 26 refuses to load on anything older.
+set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
+
 project(GradientRemap CXX C)
 
 # OBJCXX is needed for GradientRemap_FileDialog.mm (native macOS NSSavePanel/NSOpenPanel
