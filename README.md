@@ -22,9 +22,15 @@ Appears in After Effects under **Effect > Color Correction > Gradient Remap**.
 
 ## Install (macOS)
 
-Copy `GradientRemap.plugin` into `/Applications/Adobe After Effects <version>/Plug-ins/`
-and restart After Effects. When replacing an existing copy, delete the old bundle first
-so After Effects doesn't reuse its cached plugin info.
+Requires an Apple Silicon Mac, macOS 12 or later. The plugin is signed and notarized.
+
+1. Download the zip from the [latest release](https://github.com/rob-creates/AE_GradientRemap/releases/latest)
+   and unzip it.
+2. Copy `GradientRemap.plugin` into `/Applications/Adobe After Effects <version>/Plug-ins/`.
+3. Restart After Effects.
+
+When replacing an existing copy, delete the old `GradientRemap.plugin` first so After
+Effects doesn't reuse its cached plugin info.
 
 ## Build
 
@@ -38,7 +44,9 @@ cmake --build build
 ctest --test-dir build   # core colour/interpolation tests
 ```
 
-The plugin bundle is written to `build/GradientRemap.plugin`.
+The plugin bundle is written to `build/GradientRemap.plugin`. `scripts/release.sh` builds,
+signs, notarizes and packages a release (needs a Developer ID certificate and a
+`notarytool` keychain profile).
 
 ## Licence
 
