@@ -2,9 +2,7 @@
 
 ![Gradient Remap demo](docs/images/demo.gif)
 
-A luminance-to-gradient colour remap effect for Adobe After Effects: a precise,
-multi-knot alternative to Colorama and Tint. Black maps exactly to the first knot and white
-exactly to the last, with no knot-blending drift.
+A simple colour remap effect for Adobe After Effects with precise colour placement, created as an alternative to Colorama and CC Toner.
 
 ## Features
 
@@ -16,11 +14,11 @@ exactly to the last, with no knot-blending drift.
 - **Interpolation:** Cubic, Ease, Linear or Step.
 - **Range:** Offset, Cycles and Loop (Cycle / Wave / Bounce) to shift and repeat the
   gradient across the input range.
-- **Save / Load Gradient** as a simple `position,r,g,b,a` CSV (TouchDesigner Table DAT
+- **Save / Load Gradient** export and share colour gradients in CSV format (TouchDesigner Table DAT
   compatible).
 - 8, 16 and 32 bpc, with optional banding reduction at 8 bpc and range clamping at 32 bpc.
 
-Found under **Effect > Color Correction > Gradient Remap**.
+Appears in After Effects under **Effect > Color Correction > Gradient Remap**.
 
 ## Install (macOS)
 
