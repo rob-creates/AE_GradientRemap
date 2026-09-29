@@ -22,7 +22,8 @@ Appears in After Effects under **Effect > Color Correction > Gradient Remap**.
 
 ## Install (macOS)
 
-Requires an Apple Silicon Mac, macOS 12 or later. The plugin is signed and notarized.
+The current release is built for macOS only. It requires an Apple Silicon Mac running
+macOS 12 or later, and is signed and notarized. A Windows version is not yet available.
 
 1. Download the zip from the [latest release](https://github.com/rob-creates/AE_GradientRemap/releases/latest)
    and unzip it.
