@@ -371,7 +371,7 @@ static PF_Err ParamsSetup(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef*
     // space the blend math happens in; kept as GRADREMAP_INTERP_MODE/InterpMode
     // internally (see GradientRemap.h). "Naive" renamed to "Native".
     AEFX_CLR_STRUCT(def);
-    PF_ADD_POPUP("Colour Space", 3, InterpModePopup_NATIVE, "OKLCH|Native|Linear Light", INTERP_MODE_DISK_ID);
+    PF_ADD_POPUP("Colour Space", 3, InterpModePopup_OKLCH, "OKLCH|Native|Linear Light", INTERP_MODE_DISK_ID);
 
     // Displayed as "Interpolation" (2026-09-25, user feedback) -- picks the
     // interpolation path/curve shape between knots; kept as GRADREMAP_PATH/InterpPath

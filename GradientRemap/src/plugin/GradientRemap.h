@@ -107,10 +107,10 @@ enum {
 //
 // Order matches the "Colour Space" popup string in ParamsSetup, not declaration order:
 // OKLCH listed first (2026-09-25, user preference -- handles chroma/hue traversal best)
-// with Linear Light pushed last (least commonly needed). Not yet made the *default*
-// selection -- OKLCH's perceptually-uniform lightness axis renders a black/white ramp's
-// shadow end noticeably darker than Native/Linear Light (confirmed with real numbers,
-// see docs/DESIGN.md); still deciding whether that's the right default.
+// with Linear Light pushed last (least commonly needed). Also the default selection
+// (2026-09-28, user decision), accepting the known tradeoff: OKLCH's perceptually-uniform
+// lightness axis renders a black/white ramp's shadow end noticeably darker than
+// Native/Linear Light (confirmed with real numbers, see docs/DESIGN.md).
 // "Naive" renamed to "Native" (2026-09-25, user feedback -- clearer name for "blend
 // directly in the project's own working colour space, no conversion").
 enum { InterpModePopup_OKLCH = 1, InterpModePopup_NATIVE, InterpModePopup_LINEAR_LIGHT };
@@ -152,11 +152,16 @@ void GradientRemap_ApplyInterpPopups(GradientRemap::GradientData& g, A_long inte
 // event_extra->effect_win.current_frame, which can differ (panel is resizable).
 constexpr A_long kGradientBarWidth = 200;
 constexpr A_long kGradientBarHeight = 24;    // the coloured gradient strip itself
-constexpr A_long kKnotMarkerHeight = 10;     // downward-pointing triangle, below the bar
+// Knot marker below the bar: a short pointer tip (touching the bar) above a square
+// colour swatch filled with the knot's own colour, Photoshop-style (2026-09-28: the
+// previous 10px triangle was mostly covered by its outline, so knot colours didn't read).
+constexpr A_long kKnotPointerHeight = 4;
+constexpr A_long kKnotSwatchSize = 10;
+constexpr A_long kKnotMarkerHeight = kKnotPointerHeight + kKnotSwatchSize;
 constexpr A_long kGradientUIMargin = 4;      // breathing room above the bar
 constexpr A_long kGradientUITotalHeight = kGradientUIMargin + kGradientBarHeight + kKnotMarkerHeight + 2;
 constexpr float kKnotHitHalfWidth = 6.0f;    // px either side of a knot's x, for hit-testing
-constexpr float kKnotMarkerHalfWidth = 5.0f; // px, drawn triangle half-width at its base
+constexpr float kKnotMarkerHalfWidth = kKnotSwatchSize * 0.5f; // px, drawn marker half-width
 constexpr float kKnotDeleteDragDistance = 40.0f; // px away from the bar to mark a dragged knot for deletion
 
 // Double-click detection: AE hands effects PF_DoClickEventInfo::num_clicks, which

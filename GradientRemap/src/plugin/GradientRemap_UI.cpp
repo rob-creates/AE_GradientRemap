@@ -10,8 +10,8 @@
 // removed rather than debugged further: drag-off-the-bar deletion already covers the
 // same need and is confirmed working.
 //
-// Geometry: a single coloured strip (kGradientBarHeight px) with downward-pointing
-// triangle knot markers below it (kKnotMarkerHeight px) -- the conventional Photoshop/
+// Geometry: a single coloured strip (kGradientBarHeight px) with pointer-and-swatch knot
+// markers below it (kKnotMarkerHeight px) -- the conventional Photoshop/
 // Cinema 4D gradient-editor layout. Hit-testing and drawing always use the real panel
 // width from event_extra->effect_win.current_frame (the panel is resizable), not the
 // nominal width hint passed to PF_ADD_ARBITRARY2.
@@ -212,32 +212,42 @@ PF_Err DrawEvent(PF_InData* in_data, PF_OutData* out_data, PF_ParamDef* params[]
             PF_Boolean delete_pending = seq ? seq->delete_pending : FALSE;
             UnlockSeqData(in_data);
 
-            // Knot markers: downward-pointing triangles hanging below the strip.
+            // Knot markers: a pointer tip touching the strip above a square swatch filled
+            // with the knot's colour. Every marker carries a thin light-grey keyline so it
+            // reads against both the dark panel and any fill colour; the selected knot's
+            // keyline is thicker and white.
+            constexpr DRAWBOT_ColorRGBA kKeylineGrey = {0.75f, 0.75f, 0.75f, 1.0f};
+            constexpr DRAWBOT_ColorRGBA kKeylineSelected = {1.0f, 1.0f, 1.0f, 1.0f};
             for (size_t i = 0; i < g.knots.size() && !err; ++i) {
                 bool is_selected = (static_cast<A_long>(i) == selected);
                 bool fading = is_selected && delete_pending;
                 float shrink = fading ? 0.6f : 1.0f;
 
-                float x = KnotScreenX(bar, g.knots[i].position);
-                float apex_y = (float)(bar.top + kGradientBarHeight);
+                // Snap to the pixel centre so a 1px keyline renders crisp, not smeared
+                // across two pixels.
+                float x = std::floor(KnotScreenX(bar, g.knots[i].position)) + 0.5f;
+                float apex_y = (float)(bar.top + kGradientBarHeight) + 0.5f;
                 float half_w = kKnotMarkerHalfWidth * shrink;
-                float base_y = apex_y + (float)kKnotMarkerHeight * shrink;
+                float shoulder_y = apex_y + (float)kKnotPointerHeight * shrink;
+                float base_y = apex_y + (float)kKnotMarkerHeight * shrink - 1.0f;
 
                 DRAWBOT_PathRef tri_path = nullptr;
                 ERR(drawbotSuites.supplier_suiteP->NewPath(supplier_ref, &tri_path));
                 ERR(drawbotSuites.path_suiteP->MoveTo(tri_path, x, apex_y));
-                ERR(drawbotSuites.path_suiteP->LineTo(tri_path, x - half_w, base_y));
+                ERR(drawbotSuites.path_suiteP->LineTo(tri_path, x + half_w, shoulder_y));
                 ERR(drawbotSuites.path_suiteP->LineTo(tri_path, x + half_w, base_y));
+                ERR(drawbotSuites.path_suiteP->LineTo(tri_path, x - half_w, base_y));
+                ERR(drawbotSuites.path_suiteP->LineTo(tri_path, x - half_w, shoulder_y));
                 ERR(drawbotSuites.path_suiteP->Close(tri_path));
 
-                DRAWBOT_ColorRGBA fillColor = {g.knots[i].r, g.knots[i].g, g.knots[i].b, fading ? 0.4f : 1.0f};
+                DRAWBOT_ColorRGBA fillColor = {ClampUnit(g.knots[i].r), ClampUnit(g.knots[i].g), ClampUnit(g.knots[i].b),
+                                               fading ? 0.4f : 1.0f};
                 DRAWBOT_BrushRef fill_brush = nullptr;
                 ERR(drawbotSuites.supplier_suiteP->NewBrush(supplier_ref, &fillColor, &fill_brush));
                 ERR(drawbotSuites.surface_suiteP->FillPath(surface_ref, fill_brush, tri_path, kDRAWBOT_FillType_Default));
                 if (fill_brush) drawbotSuites.supplier_suiteP->ReleaseObject((DRAWBOT_ObjectRef)fill_brush);
 
-                DRAWBOT_ColorRGBA outlineColor =
-                    is_selected ? DRAWBOT_ColorRGBA{1.0f, 1.0f, 1.0f, 1.0f} : DRAWBOT_ColorRGBA{0.0f, 0.0f, 0.0f, 1.0f};
+                DRAWBOT_ColorRGBA outlineColor = is_selected ? kKeylineSelected : kKeylineGrey;
                 DRAWBOT_PenRef outline_pen = nullptr;
                 ERR(drawbotSuites.supplier_suiteP->NewPen(supplier_ref, &outlineColor, is_selected ? 2.0f : 1.0f,
                                                            &outline_pen));
